@@ -1,0 +1,1246 @@
+"""3D viewport: pyqtgraph.opengl GLViewWidget with model, supports, contacts, issues.
+
+Navigation: left drag orbit, middle drag (or Shift + left drag) pan, wheel zoom,
+Ctrl + left drag pan in the view plane.
+Editing: left click on a contact selects it, left click on the model adds a manual contact
+at the exact ray / mesh hit, right click on a contact removes it.
+The viewport never edits the project: it emits signals handled by the main window.
+"""
+from __future__ import annotations
+
+import math
+import time
+from typing import Optional
+
+import numpy as np
+import pyqtgraph.opengl as gl
+import trimesh
+from OpenGL import GL
+from pyqtgraph.opengl import shaders
+from PySide6 import QtCore, QtGui, QtWidgets
+
+from . import icons, overhang, theme
+from .picking import BackgroundPicker
+
+try:        # pyqtgraph >= 0.14 uploads vertex buffers only when flagged dirty
+    from pyqtgraph.opengl.items.GLMeshItem import DirtyFlag as _DirtyFlag
+except ImportError:     # pragma: no cover - pyqtgraph 0.13
+    _DirtyFlag = None
+
+CLICK_TOLERANCE_PX = 5          # a press/release closer than this is a click, not a drag
+CONTACT_PICK_RADIUS_PX = 9
+HOVER_INTERVAL_MS = 40          # hover picking is deferred and coalesced (QA-11)
+
+# depth test off: markers always visible through the model
+OVERLAY_GL = {GL.GL_DEPTH_TEST: False, GL.GL_BLEND: True, GL.GL_CULL_FACE: False,
+              "glBlendFunc": (GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)}
+
+_LIT_SHADER = shaders.ShaderProgram("arbor_lit", [
+    shaders.VertexShader("""
+        uniform mat4 u_mvp;
+        uniform mat3 u_normal;
+        attribute vec4 a_position;
+        attribute vec3 a_normal;
+        attribute vec4 a_color;
+        varying vec4 v_color;
+        varying vec3 v_normal;
+        void main() {
+            v_normal = normalize(u_normal * a_normal);
+            v_color = a_color;
+            gl_Position = u_mvp * a_position;
+        }
+    """),
+    shaders.FragmentShader("""
+        #ifdef GL_ES
+        precision mediump float;
+        #endif
+        varying vec4 v_color;
+        varying vec3 v_normal;
+        void main() {
+            vec3 n = normalize(v_normal);
+            vec3 key = normalize(vec3(0.35, 0.55, 1.0));
+            vec3 fill = normalize(vec3(-0.6, -0.2, 0.6));
+            float d = abs(dot(n, key));
+            float f = abs(dot(n, fill));
+            float rim = pow(1.0 - abs(n.z), 3.0);
+            vec3 h = normalize(key + vec3(0.0, 0.0, 1.0));
+            float s = pow(abs(dot(n, h)), 40.0) * 0.18;
+            vec3 rgb = v_color.rgb * (0.22 + 0.62 * d + 0.18 * f) + vec3(s) + 0.06 * rim;
+            gl_FragColor = vec4(rgb, v_color.a);
+        }
+    """),
+])
+
+
+def _qmatrix(m: np.ndarray) -> QtGui.QMatrix4x4:
+    return QtGui.QMatrix4x4(*[float(v) for v in np.asarray(m, float).reshape(-1)])
+
+
+def _np_matrix(q: QtGui.QMatrix4x4) -> np.ndarray:
+    # QMatrix4x4.data() is column-major
+    return np.array(q.data(), dtype=float).reshape(4, 4).T
+
+
+def clip_mesh(mesh: trimesh.Trimesh, z: float) -> Optional[trimesh.Trimesh]:
+    """Part of the mesh below z (open cut, display only)."""
+    if mesh is None or len(mesh.faces) == 0:
+        return None
+    lo, hi = mesh.bounds[:, 2]
+    if z >= hi:
+        return mesh
+    if z <= lo:
+        return None
+    try:
+        out = trimesh.intersections.slice_mesh_plane(mesh, plane_normal=[0, 0, -1],
+                                                     plane_origin=[0, 0, z], cap=False)
+        return out if len(out.faces) else None
+    except Exception:
+        keep = mesh.triangles[:, :, 2].max(axis=1) <= z
+        if not keep.any():
+            return None
+        return trimesh.Trimesh(mesh.vertices, mesh.faces[keep], process=False)
+
+
+class FaceColorMeshItem(gl.GLMeshItem):
+    """GLMeshItem whose per-face colours can change without re-sending the geometry:
+    only the colour buffer is rebuilt and uploaded (threshold change on a 1 M face mesh)."""
+
+    COLOR_DTYPE = np.uint8 if _DirtyFlag is not None else np.float32
+
+    def __init__(self, **kw):
+        self._vertex_rgba: Optional[np.ndarray] = None
+        self._colors_dirty = False
+        super().__init__(**kw)
+
+    def set_vertex_colors(self, rgba: Optional[np.ndarray]) -> None:
+        """(3 * faces, 4) colours for the non-indexed draw, or None for the plain colour."""
+        self._vertex_rgba = rgba
+        self._colors_dirty = True
+        self.update()
+
+    def has_custom_colors(self) -> bool:
+        return self._vertex_rgba is not None
+
+    def parseMeshData(self):
+        fresh = self.vertexes is None
+        bits = super().parseMeshData()
+        if (fresh or self._colors_dirty) and self.vertexes is not None:
+            rgba = self._vertex_rgba
+            n = int(np.prod(self.vertexes.shape[:-1]))
+            self.colors = rgba if rgba is not None and len(rgba) == n else None
+            self._colors_dirty = False
+            if _DirtyFlag is not None:
+                bits = (bits or _DirtyFlag(0)) | _DirtyFlag.COLOR
+        return bits
+
+
+def overlay_style(extra: str = "") -> str:
+    """Stylesheet of the cards drawn over the 3D view (legends, progress)."""
+    return (f"QFrame {{ background: {theme.OVERLAY_BG}; border: 1px solid {theme.BORDER};"
+            f" border-radius: {theme.R_L}px; }} QLabel {{ border: none; background: transparent;"
+            f" font-size: {theme.FS_SMALL}pt; }} " + extra)
+
+
+def _overlay_title(text: str = "") -> QtWidgets.QLabel:
+    lab = QtWidgets.QLabel(text)
+    lab.setStyleSheet(f"color: {theme.TEXT_STRONG}; font-weight: 600; border: none;"
+                      f" font-size: {theme.FS_SMALL}pt;")
+    return lab
+
+
+class OverhangLegend(QtWidgets.QFrame):
+    """Angle bands of the overhang colouring, with the area of each band."""
+
+    def __init__(self, parent: QtWidgets.QWidget):
+        super().__init__(parent)
+        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        self.setStyleSheet(overlay_style())
+        lay = QtWidgets.QGridLayout(self)
+        lay.setContentsMargins(theme.SP_M + 2, theme.SP_M - 2, theme.SP_M + 2, theme.SP_M - 2)
+        lay.setHorizontalSpacing(theme.SP_M)
+        lay.setVerticalSpacing(theme.SP_XS + 1)
+        self.title = _overlay_title()
+        lay.addWidget(self.title, 0, 0, 1, 3)
+        self.range_labels: dict[str, QtWidgets.QLabel] = {}
+        self.area_labels: dict[str, QtWidgets.QLabel] = {}
+        base = "#%02x%02x%02x" % tuple(int(c * 255) for c in theme.MODEL_COLOR[:3])
+        for r, key in enumerate(overhang.BAND_KEYS, start=1):
+            dot = QtWidgets.QLabel()
+            dot.setFixedSize(10, 10)
+            dot.setStyleSheet(f"background: {overhang.BAND_HEX.get(key, base)}; "
+                              "border-radius: 2px; border: none;")
+            name = QtWidgets.QLabel("")
+            area = QtWidgets.QLabel("")
+            area.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            area.setStyleSheet(f"color: {theme.TEXT}; border: none;")
+            lay.addWidget(dot, r, 0)
+            lay.addWidget(name, r, 1)
+            lay.addWidget(area, r, 2)
+            self.range_labels[key] = name
+            self.area_labels[key] = area
+        note = QtWidgets.QLabel("Angle from vertical. Faces on the plate are ignored.")
+        note.setStyleSheet(f"color: {theme.TEXT_DIM}; border: none; font-size: 8pt;")
+        lay.addWidget(note, len(overhang.BAND_KEYS) + 1, 0, 1, 3)
+        self.set_state(55.0, None)
+
+    def set_state(self, threshold: float, areas: Optional[np.ndarray]) -> None:
+        self.title.setText(f"Overhangs  (threshold {threshold:.0f}\u00b0)")
+        for b in overhang.bands(threshold):
+            self.range_labels[b.key].setText(b.label)
+        for k, key in enumerate(overhang.BAND_KEYS):
+            self.area_labels[key].setText("" if areas is None else f"{areas[k]:.0f} mm\u00b2")
+        self.adjustSize()
+
+
+class Legend(QtWidgets.QFrame):
+    """Contact reasons with colours and counts, drawn over the 3D view."""
+
+    def __init__(self, parent: QtWidgets.QWidget):
+        super().__init__(parent)
+        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        self.setStyleSheet(overlay_style())
+        lay = QtWidgets.QGridLayout(self)
+        lay.setContentsMargins(theme.SP_M + 2, theme.SP_M - 2, theme.SP_M + 2, theme.SP_M - 2)
+        lay.setHorizontalSpacing(theme.SP_M)
+        lay.setVerticalSpacing(theme.SP_XS + 1)
+        self.count_labels: dict[str, QtWidgets.QLabel] = {}
+        self.title = _overlay_title("Contacts")
+        self.total_label = _overlay_title("0")
+        self.total_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        lay.addWidget(self.title, 0, 0, 1, 2)
+        lay.addWidget(self.total_label, 0, 2)
+        rows = [(k, lbl, col) for k, (lbl, col) in theme.REASON_STYLE.items()]
+        rows += [("supports", "Supports", theme.hex_to_q(theme.SUPPORT_COLOR)),
+                 ("unsupported", "Unsupported", theme.hex_to_q(theme.UNSUPPORTED_COLOR))]
+        row = 1
+        for key, label, col in rows:
+            if key == "supports":           # a thin rule between contact reasons and results
+                sep = QtWidgets.QFrame()
+                sep.setFixedHeight(1)
+                sep.setStyleSheet(f"background: {theme.BORDER}; border: none;")
+                lay.addWidget(sep, row, 0, 1, 3)
+                row += 1
+            dot = QtWidgets.QLabel()
+            shape = "border-radius: 5px;" if key not in ("supports",) else "border-radius: 2px;"
+            dot.setFixedSize(10, 10)
+            dot.setStyleSheet(f"background: {col}; {shape} border: none;")
+            name = QtWidgets.QLabel(label)
+            cnt = QtWidgets.QLabel("0")
+            cnt.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            cnt.setStyleSheet(f"color: {theme.TEXT_STRONG}; font-weight: 600; border: none;")
+            lay.addWidget(dot, row, 0)
+            lay.addWidget(name, row, 1)
+            lay.addWidget(cnt, row, 2)
+            row += 1
+            self.count_labels[key] = cnt
+        self.adjustSize()
+
+    def set_counts(self, counts: dict[str, int]) -> None:
+        for k, lab in self.count_labels.items():
+            lab.setText(str(counts.get(k, 0)) if k != "supports" else counts.get(k, "-"))
+        self.total_label.setText(str(sum(int(counts.get(k, 0)) for k in theme.REASON_STYLE)))
+        unsup = int(counts.get("unsupported", 0))
+        self.count_labels["unsupported"].setStyleSheet(
+            f"color: {theme.ERROR if unsup else theme.TEXT_STRONG}; font-weight: 600; border: none;")
+        self.adjustSize()
+
+
+class BusyCard(QtWidgets.QFrame):
+    """Progress of the running computation over the 3D view: task, current step, progress,
+    elapsed time and a Cancel button (the window stays usable meanwhile)."""
+    cancelRequested = QtCore.Signal()
+
+    def __init__(self, parent: QtWidgets.QWidget):
+        super().__init__(parent)
+        self.setObjectName("busyCard")
+        self.setStyleSheet(overlay_style(
+            f"QFrame#busyCard {{ border: 1px solid {theme.BANNER['busy'][2]}; }}"
+            f" QProgressBar {{ max-height: 6px; min-height: 6px; border: none;"
+            f" background: {theme.BG_INPUT}; border-radius: 3px; }}"
+            f" QProgressBar::chunk {{ background: {theme.ACCENT}; border-radius: 3px; }}"))
+        lay = QtWidgets.QGridLayout(self)
+        lay.setContentsMargins(theme.SP_L, theme.SP_M + 2, theme.SP_L, theme.SP_M + 2)
+        lay.setHorizontalSpacing(theme.SP_M)
+        lay.setVerticalSpacing(theme.SP_S + 2)
+        self.title = _overlay_title("")
+        self.title.setStyleSheet(self.title.styleSheet() + f" font-size: {theme.FS_BASE}pt;")
+        self.percent = QtWidgets.QLabel("")
+        self.percent.setStyleSheet(f"color: {theme.TEXT_STRONG}; font-weight: 600;")
+        self.percent.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        self.step = QtWidgets.QLabel("")
+        self.step.setStyleSheet(f"color: {theme.TEXT};")
+        self.elapsed = QtWidgets.QLabel("")
+        self.elapsed.setStyleSheet(f"color: {theme.TEXT_DIM};")
+        self.elapsed.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        self.bar = QtWidgets.QProgressBar()
+        self.bar.setRange(0, 1000)
+        self.bar.setTextVisible(False)
+        self.cancel_button = QtWidgets.QPushButton("Cancel")
+        self.cancel_button.setIcon(icons.cancel())
+        self.cancel_button.setToolTip("Stop the computation (Esc)")
+        self.cancel_button.setStyleSheet(
+            f"QPushButton {{ background: {theme.BG_INPUT}; border: 1px solid {theme.BORDER};"
+            f" border-radius: {theme.R_M}px; padding: 3px {theme.SP_M + 2}px; }}"
+            f" QPushButton:hover {{ background: {theme.BG_HOVER}; border-color: {theme.ERROR}; }}")
+        self.cancel_button.clicked.connect(self.cancelRequested)
+        lay.addWidget(self.title, 0, 0)
+        lay.addWidget(self.percent, 0, 1)
+        lay.addWidget(self.cancel_button, 0, 2, 3, 1, QtCore.Qt.AlignVCenter)
+        lay.addWidget(self.bar, 1, 0, 1, 2)
+        lay.addWidget(self.step, 2, 0)
+        lay.addWidget(self.elapsed, 2, 1)
+        lay.setColumnStretch(0, 1)
+        self.setFixedWidth(360)
+        self.hide()
+
+    def set_state(self, title: str, fraction: float, step: str, elapsed_s: float) -> None:
+        self.title.setText(title)
+        f = min(max(float(fraction), 0.0), 1.0)
+        self.bar.setValue(int(f * 1000))
+        self.percent.setText(f"{f * 100:.0f} %")
+        fm = self.step.fontMetrics()
+        self.step.setText(fm.elidedText(step or "Starting", QtCore.Qt.ElideRight, 200))
+        self.step.setToolTip(step)
+        self.elapsed.setText(f"{elapsed_s:.0f} s" if elapsed_s < 60 else
+                             f"{int(elapsed_s // 60)} min {int(elapsed_s % 60):02d} s")
+
+
+class Viewport(gl.GLViewWidget):
+    contactAddRequested = QtCore.Signal(object, object)     # position (3,), normal (3,)
+    contactRemoveRequested = QtCore.Signal(int)
+    contactSelected = QtCore.Signal(object)                 # contact id or None
+    hoverChanged = QtCore.Signal(object)                    # hit position or None
+    hoverTargetChanged = QtCore.Signal()     # contact / issue marker under the cursor changed
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self.setBackgroundColor(tuple(int(c * 255) for c in theme.SCENE_BG))
+        self.setMouseTracking(True)
+        self.setMinimumSize(320, 240)
+        self.opts["fov"] = 40
+
+        self.view_mode = "both"                 # "model" | "supports" | "both"
+        self.clip_z: Optional[float] = None      # None = no clipping
+        self.edit_enabled = True
+        self.ghost_enabled = True
+        self.tip_length = 1.6
+        self.tip_radius = 0.5
+        # overhang colouring (display only)
+        self.overhang_enabled = False
+        self.overhang_threshold = 55.0
+        self.overhang_plate_height = 0.12
+        self.overhang_classes: Optional[np.ndarray] = None     # band index per shown face
+        self.overhang_areas: Optional[np.ndarray] = None
+        self.overhang_timings: dict[str, float] = {}
+        self._angle_cache: Optional[tuple] = None      # (mesh, angles, top z, areas)
+        self._model_shown: Optional[trimesh.Trimesh] = None
+        self._overhang_key: Optional[tuple] = None
+
+        self.model_mesh: Optional[trimesh.Trimesh] = None
+        self.support_mesh: Optional[trimesh.Trimesh] = None
+        self.raft_mesh: Optional[trimesh.Trimesh] = None
+        self.contacts: list = []
+        self.issues: list = []
+        self.selected_id: Optional[int] = None
+        self._press_pos: Optional[QtCore.QPointF] = None
+        self._press_button = None
+        self._hover_pos: Optional[QtCore.QPointF] = None
+        self.hovered_contact_id: Optional[int] = None
+        self.hovered_issue: Optional[int] = None          # index in self.issues
+        self._picker: Optional[BackgroundPicker] = None
+
+        self.grid = gl.GLGridItem(color=theme.GRID_COLOR)
+        self.grid.setSize(200, 200)
+        self.grid.setSpacing(10, 10)
+        self.addItem(self.grid)
+        self.plate_outline = gl.GLLinePlotItem(color=(0.35, 0.55, 0.8, 0.8), width=1.5,
+                                               mode="line_strip", antialias=True)
+        self.addItem(self.plate_outline)
+        self.axes = gl.GLLinePlotItem(mode="lines", width=2, antialias=True)
+        self.addItem(self.axes)
+
+        self.model_item = self._mesh_item(theme.MODEL_COLOR, FaceColorMeshItem)
+        self.support_item = self._mesh_item(theme.SUPPORT_COLOR)
+        self.raft_item = self._mesh_item(theme.RAFT_COLOR)
+        self.selection_item = gl.GLScatterPlotItem(pxMode=True, glOptions=OVERLAY_GL)
+        self.selection_item.setDepthValue(5)
+        self.addItem(self.selection_item)
+        self.contact_item = gl.GLScatterPlotItem(pxMode=True, glOptions="translucent")
+        self.contact_item.setDepthValue(6)
+        self.addItem(self.contact_item)
+        self.issue_item = gl.GLScatterPlotItem(pxMode=True, glOptions=OVERLAY_GL)
+        self.issue_item.setDepthValue(10)
+        self.addItem(self.issue_item)
+        self.issue_lines = gl.GLLinePlotItem(mode="lines", width=1.5, glOptions=OVERLAY_GL,
+                                             antialias=True)
+        self.issue_lines.setDepthValue(9)
+        self.addItem(self.issue_lines)
+        cone = trimesh.creation.cone(radius=1.0, height=1.0, sections=20)
+        cone.apply_transform(np.diag([1.0, 1.0, -1.0, 1.0]))   # apex at origin, base at z=-1
+        cone.apply_translation([0, 0, 1.0])                  # base at z=1 (along +normal)
+        cone.invert()
+        self.ghost_item = gl.GLMeshItem(vertexes=np.asarray(cone.vertices, np.float32),
+                                        faces=np.asarray(cone.faces, np.uint32),
+                                        color=theme.GHOST_COLOR, smooth=False,
+                                        shader=_LIT_SHADER, glOptions="translucent")
+        self.ghost_item.setDepthValue(20)
+        self.ghost_item.hide()
+        self.addItem(self.ghost_item)
+
+        self.legend = Legend(self)
+        self.busy_card = BusyCard(self)
+        self.overhang_legend = OverhangLegend(self)
+        self.overhang_legend.hide()
+        self._hover_timer = QtCore.QTimer(self, singleShot=True, interval=HOVER_INTERVAL_MS)
+        self._hover_timer.timeout.connect(self._update_hover)
+        self._clip_timer = QtCore.QTimer(self, singleShot=True, interval=60)
+        self._clip_timer.timeout.connect(self._rebuild_geometry)
+        self._update_grid(None)
+        self.setCameraPosition(distance=160, elevation=25, azimuth=-60)
+
+    # ------------------------------------------------------------------ items
+    def _mesh_item(self, color, cls=gl.GLMeshItem) -> gl.GLMeshItem:
+        item = cls(color=color, smooth=False, shader=_LIT_SHADER, glOptions="opaque")
+        item.hide()
+        self.addItem(item)
+        return item
+
+    @staticmethod
+    def _set_mesh(item: gl.GLMeshItem, mesh: Optional[trimesh.Trimesh], visible: bool) -> None:
+        if mesh is None or len(mesh.faces) == 0 or not visible:
+            item.hide()
+            return
+        item.setMeshData(vertexes=np.asarray(mesh.vertices, np.float32),
+                         faces=np.asarray(mesh.faces, np.uint32))
+        item.show()
+
+    # ------------------------------------------------------------------ data
+    def set_model(self, mesh: Optional[trimesh.Trimesh], fit: bool = False) -> None:
+        if mesh is not self.model_mesh:
+            # acceleration structure for picking: built once per mesh, in a background
+            # thread for large meshes (the UI thread never builds it)
+            self._picker = BackgroundPicker(mesh) if mesh is not None and len(mesh.faces) else None
+        self.model_mesh = mesh
+        self._update_grid(mesh)
+        self._rebuild_geometry()
+        if fit:
+            self.fit_view()
+
+    def set_supports(self, support_mesh, raft_mesh) -> None:
+        self.support_mesh = support_mesh if support_mesh is not None and len(
+            getattr(support_mesh, "faces", [])) else None
+        self.raft_mesh = raft_mesh if raft_mesh is not None and len(
+            getattr(raft_mesh, "faces", [])) else None
+        self._rebuild_geometry()
+
+    def set_contacts(self, contacts: list) -> None:
+        self.contacts = list(contacts)
+        self._update_contacts()
+
+    def set_issues(self, issues: list) -> None:
+        self.issues = list(issues)
+        if self.hovered_issue is not None:
+            self._set_hover_target(self.hovered_contact_id, None)
+        self._update_issues()
+
+    def set_selected(self, contact_id: Optional[int]) -> None:
+        self.selected_id = contact_id
+        self._update_contacts()
+
+    def set_view_mode(self, mode: str) -> None:
+        if mode not in ("model", "supports", "both"):
+            raise ValueError(mode)
+        self.view_mode = mode
+        self._rebuild_geometry()
+
+    def set_clip(self, z: Optional[float]) -> None:
+        self.clip_z = z
+        self._clip_timer.start()
+
+    def scene_height(self) -> float:
+        hs = [m.bounds[1][2] for m in (self.model_mesh, self.support_mesh, self.raft_mesh)
+              if m is not None and len(m.faces)]
+        return float(max(hs)) if hs else 0.0
+
+    # ------------------------------------------------------------------ overhang colours
+    def set_overhang_display(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled != self.overhang_enabled:
+            self.overhang_enabled = enabled
+            self._update_overhang_colors()
+
+    def set_overhang_params(self, threshold_deg: float, plate_height: float) -> None:
+        """Current overhang_angle_deg and layer height: colours follow them."""
+        t, h = float(threshold_deg), float(plate_height)
+        if (t, h) == (self.overhang_threshold, self.overhang_plate_height):
+            return
+        self.overhang_threshold, self.overhang_plate_height = t, h
+        if self.overhang_enabled:
+            self._update_overhang_colors()
+
+    def _face_data(self, mesh: trimesh.Trimesh) -> tuple:
+        c = self._angle_cache
+        if c is not None and c[0] is mesh:
+            return c[1:]
+        data = overhang.face_geometry(mesh.vertices, mesh.faces)
+        self._angle_cache = (mesh,) + data
+        return data
+
+    def _update_overhang_colors(self) -> None:
+        mesh = self._model_shown
+        active = self.overhang_enabled and mesh is not None
+        if not active:
+            if self.model_item.has_custom_colors():
+                self.model_item.set_vertex_colors(None)
+            self.overhang_classes = self.overhang_areas = None
+            self._overhang_key = None
+            self.overhang_legend.hide()
+            return
+        key = (id(mesh), self.overhang_threshold, self.overhang_plate_height)
+        if key == self._overhang_key and self.model_item.has_custom_colors() \
+                and self._angle_cache is not None and self._angle_cache[0] is mesh:
+            return          # same mesh, same settings: colours already uploaded
+        self._overhang_key = key
+        t0 = time.perf_counter()
+        angles, top_z, areas = self._face_data(mesh)
+        t1 = time.perf_counter()
+        cls = overhang.classify(angles, self.overhang_threshold, top_z, self.overhang_plate_height)
+        rgba = overhang.vertex_colors(cls, theme.MODEL_COLOR, FaceColorMeshItem.COLOR_DTYPE)
+        t2 = time.perf_counter()
+        self.model_item.set_vertex_colors(rgba)
+        self.overhang_classes = cls
+        self.overhang_areas = overhang.band_areas(cls, areas)
+        self.overhang_timings = {"angles_s": t1 - t0, "classify_s": t2 - t1,
+                                 "faces": float(len(cls))}
+        self.overhang_legend.set_state(self.overhang_threshold, self.overhang_areas)
+        self.overhang_legend.show()
+        self._place_legend()
+        self.update()
+
+    def set_tip_preview(self, length: float, base_diameter: float) -> None:
+        self.tip_length = max(0.2, float(length))
+        self.tip_radius = max(0.1, float(base_diameter) / 2)
+
+    # ------------------------------------------------------------------ rendering
+    def _rebuild_geometry(self) -> None:
+        z = self.clip_z
+        show_model = self.view_mode in ("model", "both")
+        show_supports = self.view_mode in ("supports", "both")
+        model = self.model_mesh
+        supports, raft = self.support_mesh, self.raft_mesh
+        if z is not None:
+            model = clip_mesh(model, z) if model is not None else None
+            supports = clip_mesh(supports, z) if supports is not None else None
+            raft = clip_mesh(raft, z) if raft is not None else None
+        self._set_mesh(self.model_item, model, show_model)
+        self._model_shown = model if (show_model and model is not None and len(model.faces)) \
+            else None
+        self._update_overhang_colors()
+        self._set_mesh(self.support_item, supports, show_supports)
+        self._set_mesh(self.raft_item, raft, show_supports)
+        self._update_contacts()
+        self._update_issues()
+        self.update()
+
+    def _visible_contacts(self) -> list:
+        return [c for c in self.contacts
+                if self.clip_z is None or c.position[2] <= self.clip_z + 1e-6]
+
+    def _update_contacts(self) -> None:
+        cs = self._visible_contacts()
+        counts: dict[str, int] = {}
+        for c in self.contacts:
+            counts[c.reason.value] = counts.get(c.reason.value, 0) + 1
+        counts["unsupported"] = sum(1 for i in self.issues if self.issue_point(i) is not None
+                                    and getattr(i, "severity", "") == "error")
+        counts["supports"] = "yes" if self.support_mesh is not None else "-"
+        self.legend.set_counts(counts)
+        self._place_legend()
+        if not cs:
+            self.contact_item.setData(pos=np.zeros((0, 3)))
+            self.selection_item.setData(pos=np.zeros((0, 3)))
+            return
+        pos = np.array([np.asarray(c.position, float) + 0.12 * np.asarray(c.normal, float)
+                        for c in cs])
+        col = np.array([theme.reason_rgba(c.reason.value, 1.0 if c.enabled else 0.35)
+                        for c in cs])
+        size = np.array([9.0 if c.enabled else 7.0 for c in cs])
+        self.contact_item.setData(pos=pos, color=col, size=size)
+        sel = [p for p, c in zip(pos, cs) if c.id == self.selected_id]
+        if sel:
+            self.selection_item.setData(pos=np.array(sel), color=theme.SELECTED_COLOR, size=17.0)
+        else:
+            self.selection_item.setData(pos=np.zeros((0, 3)))
+
+    @staticmethod
+    def issue_point(issue) -> Optional[np.ndarray]:
+        """3D position of an issue marker, or None (no position, or not a finite 3D point:
+        issues of any code, known or not, are drawn only from a valid position)."""
+        pos = getattr(issue, "position", None)
+        if pos is None:
+            return None
+        try:
+            p = np.asarray(pos, float).reshape(-1)
+        except (TypeError, ValueError):
+            return None
+        if p.size < 3 or not np.all(np.isfinite(p[:3])):
+            return None
+        return p[:3]
+
+    def _visible_issue_points(self) -> list[tuple[int, np.ndarray]]:
+        out = []
+        for k, i in enumerate(self.issues):
+            p = self.issue_point(i)
+            if p is None or (self.clip_z is not None and p[2] > self.clip_z):
+                continue
+            out.append((k, p))
+        return out
+
+    def _update_issues(self) -> None:
+        pts, cols, lines, lcols = [], [], [], []
+        for k, p in self._visible_issue_points():
+            sev = getattr(self.issues[k], "severity", "")
+            c = (theme.UNSUPPORTED_COLOR if sev == "error" else
+                 theme.INFO_MARK_COLOR if sev == "info" else theme.WARNING_MARK_COLOR)
+            pts.append(p)
+            cols.append(c)
+            # a short vertical drop line makes the marker readable in 3D
+            lines += [p, p - np.array([0, 0, min(4.0, max(p[2], 0.0))])]
+            lcols += [c, (c[0], c[1], c[2], 0.0)]
+        if pts:
+            self.issue_item.setData(pos=np.array(pts), color=np.array(cols), size=13.0)
+            self.issue_lines.setData(pos=np.array(lines), color=np.array(lcols))
+            self.issue_lines.show()
+        else:
+            self.issue_item.setData(pos=np.zeros((0, 3)))
+            self.issue_lines.hide()
+
+    def _update_grid(self, mesh: Optional[trimesh.Trimesh]) -> None:
+        if mesh is not None and len(mesh.faces):
+            ext = float(np.max(mesh.extents[:2]))
+            size = max(60.0, math.ceil(ext * 2.0 / 20.0) * 20.0)
+        else:
+            size = 120.0
+        spacing = 5.0 if size <= 160 else 10.0
+        self.grid.setSize(size, size)
+        self.grid.setSpacing(spacing, spacing)
+        h = size / 2
+        self.plate_outline.setData(pos=np.array([[-h, -h, 0], [h, -h, 0], [h, h, 0], [-h, h, 0],
+                                                 [-h, -h, 0]], float))
+        a = 10.0
+        self.axes.setData(pos=np.array([[-h, -h, 0], [-h + a, -h, 0], [-h, -h, 0], [-h, -h + a, 0],
+                                        [-h, -h, 0], [-h, -h, a]], float),
+                          color=np.array([(0.9, 0.3, 0.3, 1)] * 2 + [(0.4, 0.85, 0.4, 1)] * 2
+                                         + [(0.35, 0.6, 1.0, 1)] * 2))
+
+    def fit_view(self) -> None:
+        meshes = [m for m in (self.model_mesh, self.support_mesh) if m is not None]
+        if not meshes:
+            self.setCameraPosition(pos=QtGui.QVector3D(0, 0, 0), distance=160)
+            return
+        lo = np.min([m.bounds[0] for m in meshes], axis=0)
+        hi = np.max([m.bounds[1] for m in meshes], axis=0)
+        c = (lo + hi) / 2
+        radius = float(np.linalg.norm(hi - lo)) / 2
+        dist = max(radius / math.tan(math.radians(self.opts["fov"]) / 2) * 1.15, 10.0)
+        self.setCameraPosition(pos=QtGui.QVector3D(*c), distance=dist)
+
+    def focus_on(self, position) -> None:
+        p = np.asarray(position, float)
+        dist = self.opts["distance"]
+        if self.model_mesh is not None:
+            dist = min(dist, float(np.linalg.norm(self.model_mesh.extents)) * 0.9)
+        self.setCameraPosition(pos=QtGui.QVector3D(*p), distance=max(dist, 8.0))
+
+    def set_preset_view(self, name: str) -> None:
+        presets = {"iso": (25, -60), "front": (0, -90), "side": (0, 0), "top": (90, -90),
+                   "bottom": (-90, -90)}
+        elev, azim = presets[name]
+        self.setCameraPosition(elevation=elev, azimuth=azim)
+
+    def resizeEvent(self, ev) -> None:
+        super().resizeEvent(ev)
+        self._place_legend()
+
+    def _place_legend(self) -> None:
+        m = theme.SP_M + 2
+        self.legend.adjustSize()
+        self.legend.move(m, self.height() - self.legend.height() - m)
+        ol = self.overhang_legend
+        ol.adjustSize()
+        ol.move(max(m, self.width() - ol.width() - m), self.height() - ol.height() - m)
+
+
+    # ------------------------------------------------------------------ picking
+    def mvp(self) -> np.ndarray:
+        vp = self.getViewport()
+        proj = _np_matrix(self.projectionMatrix(vp, vp))
+        view = _np_matrix(self.viewMatrix())
+        return proj @ view
+
+    def camera_ray(self, x: float, y: float) -> tuple[np.ndarray, np.ndarray]:
+        """World space ray (origin, unit direction) through widget pixel (x, y)."""
+        w, h = max(self.width(), 1), max(self.height(), 1)
+        ndc_x = 2.0 * x / w - 1.0
+        ndc_y = 1.0 - 2.0 * y / h
+        inv = np.linalg.inv(self.mvp())
+        near = inv @ np.array([ndc_x, ndc_y, -1.0, 1.0])
+        far = inv @ np.array([ndc_x, ndc_y, 1.0, 1.0])
+        near, far = near[:3] / near[3], far[:3] / far[3]
+        d = far - near
+        return near, d / np.linalg.norm(d)
+
+    def project_points(self, pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """World points -> widget pixels (N, 2) and a mask of points in front of the camera."""
+        pts = np.asarray(pts, float).reshape(-1, 3)
+        h4 = np.c_[pts, np.ones(len(pts))] @ self.mvp().T
+        front = h4[:, 3] > 1e-9
+        ndc = h4[:, :3] / np.where(front, h4[:, 3], 1.0)[:, None]
+        px = np.c_[(ndc[:, 0] + 1) * 0.5 * self.width(), (1 - ndc[:, 1]) * 0.5 * self.height()]
+        return px, front
+
+    def picker_ready(self) -> bool:
+        return self._picker is None or self._picker.ready
+
+    def pick_model(self, x: float, y: float, wait: bool = True
+                   ) -> Optional[tuple[np.ndarray, np.ndarray, int]]:
+        """Exact hit on the model mesh: (position, outward face normal, face index).
+
+        wait=False (hover) returns None while the picking structure is still being built
+        in the background instead of blocking the UI thread."""
+        mesh = self.model_mesh
+        if mesh is None or self.view_mode == "supports" or self._picker is None:
+            return None
+        picker = self._picker.picker if not wait else self._picker.wait()
+        if picker is None:
+            return None
+        origin, direction = self.camera_ray(x, y)
+        locs, dist, tri = picker.intersect(origin, direction)
+        for k in range(len(dist)):
+            if self.clip_z is not None and locs[k][2] > self.clip_z + 1e-6:
+                continue        # clipped away: the ray continues to the visible part
+            n = picker.face_normal(int(tri[k]))
+            if np.dot(n, direction) > 0:
+                n = -n          # the visible side faces the camera
+            return np.asarray(locs[k], float), n, int(tri[k])
+        return None
+
+    def pick_contact(self, x: float, y: float, radius_px: float = CONTACT_PICK_RADIUS_PX,
+                     wait: bool = True) -> Optional[int]:
+        cs = self._visible_contacts()
+        if not cs:
+            return None
+        px, front = self.project_points(np.array([c.position for c in cs]))
+        d = np.hypot(px[:, 0] - x, px[:, 1] - y)
+        d[~front] = np.inf
+        # prefer contacts that are not hidden behind the model
+        k = int(np.argmin(d))
+        if d[k] > radius_px:
+            return None
+        hit = self.pick_model(x, y, wait=wait)
+        if hit is not None:
+            cam = self.camera_ray(x, y)[0]
+            if np.linalg.norm(hit[0] - cam) + 0.5 < np.linalg.norm(cs[k].position - cam):
+                hidden = np.linalg.norm(hit[0] - cs[k].position) > 2.0
+                if hidden:
+                    return None
+        return cs[k].id
+
+    def pick_issue(self, x: float, y: float, radius_px: float = CONTACT_PICK_RADIUS_PX
+                   ) -> Optional[int]:
+        """Index (in self.issues) of the issue marker under pixel (x, y), or None."""
+        vis = self._visible_issue_points()
+        if not vis:
+            return None
+        px, front = self.project_points(np.array([p for _, p in vis]))
+        d = np.hypot(px[:, 0] - x, px[:, 1] - y)
+        d[~front] = np.inf
+        k = int(np.argmin(d))
+        return vis[k][0] if d[k] <= radius_px else None
+
+    def _set_hover_target(self, contact_id: Optional[int], issue: Optional[int]) -> None:
+        if (contact_id, issue) != (self.hovered_contact_id, self.hovered_issue):
+            self.hovered_contact_id, self.hovered_issue = contact_id, issue
+            self.hoverTargetChanged.emit()
+
+    # ------------------------------------------------------------------ mouse
+    def handle_click(self, x: float, y: float, button) -> str:
+        """Interpret a click. Returns what happened (used by tests)."""
+        if button == QtCore.Qt.MouseButton.RightButton:
+            cid = self.pick_contact(x, y)
+            if cid is not None and self.edit_enabled:
+                self.contactRemoveRequested.emit(cid)
+                return "remove"
+            return "none"
+        if button != QtCore.Qt.MouseButton.LeftButton:
+            return "none"
+        cid = self.pick_contact(x, y)
+        if cid is not None:
+            self.contactSelected.emit(cid)
+            return "select"
+        hit = self.pick_model(x, y)
+        if hit is not None and self.edit_enabled:
+            self.contactAddRequested.emit(hit[0], hit[1])
+            return "add"
+        self.contactSelected.emit(None)
+        return "deselect"
+
+    def mousePressEvent(self, ev) -> None:
+        self._press_pos = ev.position()
+        self._press_button = ev.button()
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev) -> None:
+        lpos = ev.position()
+        if ev.buttons() == QtCore.Qt.MouseButton.NoButton:
+            self._hover_pos = lpos
+            self._hover_timer.start()
+            self.mousePos = lpos
+            return
+        self.ghost_item.hide()
+        if ev.buttons() == QtCore.Qt.MouseButton.LeftButton and \
+                ev.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier:
+            diff = lpos - self.mousePos
+            self.mousePos = lpos
+            self.pan(diff.x(), diff.y(), 0, relative="view-upright")
+            return
+        if ev.buttons() == QtCore.Qt.MouseButton.RightButton:
+            self.mousePos = lpos
+            return
+        super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev) -> None:
+        if self._press_pos is not None and ev.button() == self._press_button:
+            moved = (ev.position() - self._press_pos).manhattanLength()
+            if moved <= CLICK_TOLERANCE_PX:
+                self.handle_click(ev.position().x(), ev.position().y(), ev.button())
+        self._press_pos = None
+        super().mouseReleaseEvent(ev)
+
+    def leaveEvent(self, ev) -> None:
+        self.ghost_item.hide()
+        self._set_hover_target(None, None)
+        self.hoverChanged.emit(None)
+        self.update()
+        super().leaveEvent(ev)
+
+    def _update_hover(self) -> None:
+        if self._hover_pos is None:
+            return
+        x, y = self._hover_pos.x(), self._hover_pos.y()
+        cid = self.pick_contact(x, y, wait=False)
+        self._set_hover_target(cid, self.pick_issue(x, y) if cid is None else None)
+        hit = (self.pick_model(x, y, wait=False) if (self.ghost_enabled and self.edit_enabled)
+               else None)
+        if hit is None or cid is not None:
+            if self.ghost_item.visible():
+                self.ghost_item.hide()
+                self.update()
+            self.hoverChanged.emit(hit[0] if hit is not None else None)
+            return
+        self.show_ghost(hit[0], hit[1])
+        self.hoverChanged.emit(hit[0])
+
+    def show_ghost(self, position, normal) -> None:
+        """Preview of a tip cone at a surface point (apex on the surface, along the normal)."""
+        n = np.asarray(normal, float)
+        n = n / (np.linalg.norm(n) or 1.0)
+        z = np.array([0.0, 0.0, 1.0])
+        v = np.cross(z, n)
+        c = float(np.dot(z, n))
+        if np.linalg.norm(v) < 1e-9:
+            rot = np.eye(3) if c > 0 else np.diag([1.0, -1.0, -1.0])
+        else:
+            k = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+            rot = np.eye(3) + k + k @ k * (1.0 / (1.0 + c))
+        m = np.eye(4)
+        m[:3, :3] = rot @ np.diag([self.tip_radius, self.tip_radius, self.tip_length])
+        m[:3, 3] = np.asarray(position, float)
+        self.ghost_item.setTransform(_qmatrix(m))
+        self.ghost_item.show()
+        self.update()
+
+
+class ViewportContainer(QtWidgets.QWidget):
+    """Viewport + view bar (mode, presets) + clipping slider."""
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self.viewport = Viewport(self)
+        bar = QtWidgets.QFrame(objectName="viewbar")
+        bl = QtWidgets.QHBoxLayout(bar)
+        bl.setContentsMargins(theme.SP_M, theme.SP_S, theme.SP_M, theme.SP_S)
+        bl.setSpacing(theme.SP_S)
+
+        def segment(items) -> tuple[QtWidgets.QFrame, list[QtWidgets.QPushButton]]:
+            """Buttons drawn as one segmented control."""
+            frame = QtWidgets.QFrame(objectName="segment")
+            sl = QtWidgets.QHBoxLayout(frame)
+            sl.setContentsMargins(0, 0, 0, 0)
+            sl.setSpacing(0)
+            out = []
+            for k, (label, tip, checkable) in enumerate(items):
+                b = QtWidgets.QPushButton(label, checkable=checkable)
+                b.setToolTip(tip)
+                b.setProperty("seg", "first" if k == 0 else
+                              ("last" if k == len(items) - 1 else "mid"))
+                sl.addWidget(b)
+                out.append(b)
+            return frame, out
+
+        # "Show" / "View" captions: hidden when the bar is narrow (1366 px screens), the
+        # segmented groups and their tooltips still say what they do
+        self.bar = bar
+        self.bar_captions = [QtWidgets.QLabel("Show", objectName="dim"),
+                             QtWidgets.QLabel("View", objectName="dim")]
+        for c in self.bar_captions:
+            c.setMinimumWidth(1)
+        bl.addWidget(self.bar_captions[0])
+        modes = (("both", "Model + supports", "Show the model and its supports"),
+                 ("model", "Model", "Show the model only"),
+                 ("supports", "Supports", "Show the supports only (raft included)"))
+        frame, buttons = segment([(lbl, tip, True) for _, lbl, tip in modes])
+        self.mode_buttons: dict[str, QtWidgets.QPushButton] = {}
+        group = QtWidgets.QButtonGroup(self)
+        for (key, _, _), b in zip(modes, buttons):
+            b.clicked.connect(lambda _=False, k=key: self.viewport.set_view_mode(k))
+            group.addButton(b)
+            self.mode_buttons[key] = b
+        self.mode_buttons["both"].setChecked(True)
+        bl.addWidget(frame)
+        bl.addSpacing(theme.SP_L)
+        bl.addWidget(self.bar_captions[1])
+        views = (("iso", "Iso", "Isometric view"), ("front", "Front", "Front view"),
+                 ("side", "Side", "Side view"), ("top", "Top", "Top view"),
+                 ("bottom", "Below", "View from below: shows the overhangs"))
+        frame, buttons = segment([(lbl, tip, False) for _, lbl, tip in views])
+        for (key, _, _), b in zip(views, buttons):
+            b.clicked.connect(lambda _=False, k=key: self.viewport.set_preset_view(k))
+        bl.addWidget(frame)
+        fit = QtWidgets.QPushButton("Fit")
+        fit.setIcon(icons.fit())
+        fit.setToolTip("Frame the whole scene (F)")
+        fit.clicked.connect(self.viewport.fit_view)
+        bl.addWidget(fit)
+        bl.addStretch(1)
+        # overhang colours: automatic (on while no support is generated) until the user
+        # clicks the button, then the user's choice is kept
+        self.overhang_button = QtWidgets.QPushButton("Overhangs", checkable=True)
+        self.overhang_button.setIcon(icons.overhang())
+        self.overhang_button.clicked.connect(self._on_overhang_clicked)
+        bl.addWidget(self.overhang_button)
+        self.overhang_choice: Optional[bool] = None    # None = automatic
+        self._supports_present = False
+        self.hint = QtWidgets.QLabel("Left click: add / select contact  \u00b7  Right click: delete"
+                                     "  \u00b7  Drag: orbit  \u00b7  Shift or middle drag: pan  "
+                                     "\u00b7  Wheel: zoom", self.viewport)
+        self.hint.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        self.hint.setStyleSheet(f"background: {theme.OVERLAY_BG_SOFT}; color: {theme.TEXT_DIM}; "
+                                f"border-radius: {theme.R_M}px; padding: 3px {theme.SP_M}px; "
+                                f"font-size: {theme.FS_SMALL}pt;")
+        self.hint.adjustSize()
+        self.hint.move(theme.SP_M + 2, theme.SP_M + 2)
+        # empty state: what to do first
+        self.empty_label = QtWidgets.QLabel(self.viewport)
+        self.empty_label.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        self.empty_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.empty_label.setTextFormat(QtCore.Qt.RichText)
+        self.empty_label.setText(
+            f"<div style='color:{theme.TEXT_STRONG}; font-size:{theme.FS_TITLE + 2}pt;"
+            f" font-weight:600'>No model loaded</div>"
+            f"<div style='color:{theme.TEXT_DIM}; margin-top:6px'>Open a model (STL, OBJ, 3MF) or an"
+            f" ArborFDM project<br>File &gt; Open (Ctrl+O), or Import model in the left panel</div>")
+        self.empty_label.setStyleSheet(f"background: {theme.OVERLAY_BG}; border: 1px solid "
+                                       f"{theme.BORDER}; border-radius: {theme.R_L}px; "
+                                       f"padding: {theme.SP_XL}px {theme.SP_XL + 8}px;")
+        self.empty_label.hide()
+        # state banner: computation running, supports out of date, mesh with errors
+        self.banner = QtWidgets.QLabel("", self.viewport)
+        self.banner.setObjectName("banner")
+        self.banner.setWordWrap(True)
+        self.banner.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        self.banner.hide()
+        self.banner_kind = ""
+        # what the cursor points at (or the selected contact): reason, note, issue message
+        self.info_card = QtWidgets.QLabel("", self.viewport)
+        self.info_card.setObjectName("infoCard")
+        self.info_card.setTextFormat(QtCore.Qt.RichText)
+        self.info_card.setWordWrap(True)
+        self.info_card.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        self.info_card.setStyleSheet(f"QLabel#infoCard {{ background: {theme.OVERLAY_BG};"
+                                     f" color: {theme.TEXT}; border: 1px solid {theme.BORDER};"
+                                     f" border-radius: {theme.R_L}px;"
+                                     f" padding: {theme.SP_S + 2}px {theme.SP_M + 2}px;"
+                                     f" font-size: {theme.FS_SMALL}pt; }}")
+        self.info_card.hide()
+
+        side = QtWidgets.QFrame(objectName="cutbar")
+        sl = QtWidgets.QVBoxLayout(side)
+        sl.setContentsMargins(theme.SP_S, theme.SP_M, theme.SP_S, theme.SP_M)
+        sl.setSpacing(theme.SP_S)
+        self.clip_label = QtWidgets.QLabel("all", objectName="dim")
+        self.clip_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.clip_label.setWordWrap(True)
+        self.clip_label.setFixedWidth(64)
+        self.clip_label.setFixedHeight(2 * self.clip_label.fontMetrics().lineSpacing() + 4)
+        self.layer_height = 0.2          # mm, wheel step (set from the current parameters)
+        self._wheel_acc = 0
+        self.clip_slider = QtWidgets.QSlider(QtCore.Qt.Vertical)
+        self.clip_slider.setRange(0, 1000)
+        self.clip_slider.setValue(1000)
+        self.clip_slider.setToolTip("Cut by height: show only what is below this height.\n"
+                                    "Mouse wheel: one layer per notch (Shift: 10 layers), "
+                                    "up = higher.")
+        self.clip_slider.valueChanged.connect(self._on_clip)
+        cut = QtWidgets.QLabel("Cut", objectName="dim")
+        cut.setToolTip(self.clip_slider.toolTip())
+        cut.setAlignment(QtCore.Qt.AlignCenter)
+        sl.addWidget(cut)
+        sl.addWidget(self.clip_slider, 1, QtCore.Qt.AlignHCenter)
+        sl.addWidget(self.clip_label)
+        self.clip_slider.installEventFilter(self)
+        side.installEventFilter(self)
+
+        mid = QtWidgets.QHBoxLayout()
+        mid.setContentsMargins(0, 0, 0, 0)
+        mid.setSpacing(0)
+        mid.addWidget(self.viewport, 1)
+        mid.addWidget(side)
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(bar)
+        lay.addLayout(mid, 1)
+        self.busy_card = self.viewport.busy_card
+        self.viewport.installEventFilter(self)       # overlays follow the view's size
+        self._apply_overhang()
+
+    def eventFilter(self, obj, ev) -> bool:
+        if ev.type() == QtCore.QEvent.Wheel and obj in (self.clip_slider, self.clip_slider.parent()):
+            # Shift can turn the vertical wheel into a horizontal one on some platforms
+            d = ev.angleDelta()
+            self._wheel_acc += d.y() or d.x()
+            steps = int(self._wheel_acc / 120)
+            if steps:
+                self._wheel_acc -= steps * 120
+                big = bool(ev.modifiers() & QtCore.Qt.ShiftModifier)
+                self.step_layers(steps * (10 if big else 1))
+            ev.accept()
+            return True
+        if obj is self.viewport and ev.type() == QtCore.QEvent.Resize:
+            # isHidden, not isVisible: also right before the window is first shown
+            if not self.banner.isHidden():
+                self._place_banner()
+            if not self.empty_label.isHidden():
+                self._place_empty()
+            self._place_busy()
+            if not self.info_card.isHidden():
+                self._place_info()
+        return False
+
+    INFO_MAX_W = 420
+
+    def set_info(self, html: str) -> None:
+        """Card at the bottom of the view describing the hovered / selected contact or the
+        hovered issue marker (empty text hides it)."""
+        if not html:
+            self.info_card.hide()
+            self.info_card.setText("")
+            return
+        if html != self.info_card.text():
+            self.info_card.setText(html)
+        self._place_info()
+        self.info_card.show()
+        self.info_card.raise_()
+
+    def _place_info(self) -> None:
+        """Bottom of the view, right of the contact legend (above it when the view is too
+        narrow); never over the overhang legend."""
+        c, vp = self.info_card, self.viewport
+        m = theme.SP_M + 2
+        lg, ol = vp.legend, vp.overhang_legend
+        left = (lg.x() + lg.width() + m) if lg.isVisible() else m
+        right = (ol.x() - m) if ol.isVisible() else vp.width() - m
+        avail = right - left
+        if avail >= 220:
+            w = min(self.INFO_MAX_W, avail)
+            c.setFixedWidth(w)
+            c.adjustSize()
+            c.move(left, vp.height() - c.height() - m)
+        else:
+            w = max(160, min(self.INFO_MAX_W, vp.width() - 2 * m))
+            c.setFixedWidth(w)
+            c.adjustSize()
+            top = (lg.y() if lg.isVisible() else vp.height()) - c.height() - theme.SP_S
+            c.move(m, max(m, top))
+
+    def _place_busy(self) -> None:
+        """Progress card: centred under the state banner (top of the view, never over the
+        legends at the bottom)."""
+        bc, vp = self.busy_card, self.viewport
+        bc.adjustSize()
+        top = (self.banner.y() + self.banner.height()) if self.banner.isVisible() else \
+            (self.hint.y() + self.hint.height() if self.hint.isVisible() else 0)
+        bc.move(max(theme.SP_M, (vp.width() - bc.width()) // 2), top + theme.SP_M)
+
+    BANNER_STYLE = theme.BANNER
+
+    def set_empty(self, empty: bool) -> None:
+        """No model: a centred call to action replaces the editing hint and the legend."""
+        self.empty_label.setVisible(empty)
+        self.hint.setVisible(not empty)
+        self.viewport.legend.setVisible(not empty)
+        if empty:
+            self._place_empty()
+            self.empty_label.raise_()
+
+    def _place_empty(self) -> None:
+        e, vp = self.empty_label, self.viewport
+        e.adjustSize()
+        e.move(max(0, (vp.width() - e.width()) // 2), max(0, (vp.height() - e.height()) // 2))
+
+    def set_busy(self, title: str, fraction: float, step: str, elapsed_s: float) -> None:
+        """Show / update the progress card (title empty hides it)."""
+        if not title:
+            self.busy_card.hide()
+            return
+        self.busy_card.set_state(title, fraction, step, elapsed_s)
+        self._place_busy()
+        self.busy_card.show()
+        self.busy_card.raise_()
+
+    def set_banner(self, text: str, kind: str = "") -> None:
+        """Persistent message over the 3D view (empty text hides it)."""
+        self.banner_kind = kind if text else ""
+        if not text:
+            self.banner.hide()
+            self.banner.setText("")
+            return
+        bg, fg, border = self.BANNER_STYLE.get(kind, self.BANNER_STYLE["stale"])
+        self.banner.setStyleSheet(f"background: {bg}; color: {fg}; border: 1px solid {border};"
+                                  f" border-left: 4px solid {border}; border-radius: {theme.R_M}px;"
+                                  f" padding: {theme.SP_S + 2}px {theme.SP_M + 2}px;"
+                                  f" font-size: {theme.FS_BASE}pt;")
+        self.banner.setText(text)
+        self._place_banner()
+        self.banner.show()
+        self.banner.raise_()
+        if self.busy_card.isVisible():
+            self._place_busy()
+
+    def _place_banner(self) -> None:
+        vp = self.viewport
+        w = max(200, vp.width() - 20)
+        self.banner.setFixedWidth(w)
+        self.banner.adjustSize()
+        top = (self.hint.y() + self.hint.height() + theme.SP_S + 2) if self.hint.isVisible() \
+            else theme.SP_M + 2
+        self.banner.move(theme.SP_M + 2, top)
+
+    def resizeEvent(self, ev) -> None:
+        super().resizeEvent(ev)
+        captions = sum(c.sizeHint().width() + theme.SP_S for c in self.bar_captions)
+        wide = self.bar.width() >= self.bar.sizeHint().width() - (
+            0 if self.bar_captions[0].isVisible() else -captions)
+        for c in self.bar_captions:
+            c.setVisible(wide)
+        if self.banner.isVisible():
+            self._place_banner()
+        if self.empty_label.isVisible():
+            self._place_empty()
+
+    # -- overhang colours ------------------------------------------------------------
+    def overhang_effective(self) -> bool:
+        if self.overhang_choice is not None:
+            return self.overhang_choice
+        return not self._supports_present
+
+    def _apply_overhang(self) -> None:
+        on = self.overhang_effective()
+        self.overhang_button.blockSignals(True)
+        self.overhang_button.setChecked(on)
+        self.overhang_button.blockSignals(False)
+        mode = "automatic: on until supports are generated" if self.overhang_choice is None \
+            else "your choice (View > Overhang colors: automatic to go back)"
+        self.overhang_button.setToolTip(
+            "Colour the model by overhang angle against the current Overhang angle "
+            f"(display only).\nNow {'on' if on else 'off'}, {mode}.")
+        self.viewport.set_overhang_display(on)
+
+    def _on_overhang_clicked(self, checked: bool) -> None:
+        self.set_overhang_choice(bool(checked))
+
+    def set_overhang_choice(self, choice: Optional[bool]) -> None:
+        """True / False forces the overhang colours, None makes them automatic."""
+        self.overhang_choice = choice
+        self._apply_overhang()
+
+    def set_supports_present(self, present: bool) -> None:
+        self._supports_present = bool(present)
+        self._apply_overhang()
+
+    def set_layer_height(self, lh: float) -> None:
+        if lh > 0:
+            self.layer_height = float(lh)
+
+    def layer_count(self) -> int:
+        h = self.viewport.scene_height()
+        return max(1, int(np.ceil(h / self.layer_height - 1e-6))) if h > 0 else 0
+
+    def current_layer(self) -> int:
+        """Layer number of the cut (top layer when nothing is cut)."""
+        z = self.viewport.clip_z
+        n = self.layer_count()
+        return n if z is None else max(1, min(n, int(round(z / self.layer_height))))
+
+    def step_layers(self, k: int) -> None:
+        """Move the cut by k layers (k > 0 up). The slider, label and clip height change at
+        once; the geometry is rebuilt by the viewport's 60 ms timer, i.e. once after the last
+        step of a burst."""
+        n_max = self.layer_count()
+        if n_max == 0 or k == 0:
+            return
+        n = min(n_max, max(1, self.current_layer() + int(k)))
+        h = self.viewport.scene_height()
+        self.clip_slider.blockSignals(True)
+        try:
+            if n >= n_max:
+                self.clip_slider.setValue(1000)
+                self._apply_cut(None)
+            else:
+                z = n * self.layer_height
+                self.clip_slider.setValue(int(round(1000 * z / h)))
+                self._apply_cut(z)
+        finally:
+            self.clip_slider.blockSignals(False)
+
+    def _on_clip(self, value: int) -> None:
+        h = self.viewport.scene_height()
+        if value >= 1000 or h <= 0:
+            self._apply_cut(None)
+        else:
+            self._apply_cut(h * value / 1000.0)
+
+    def _apply_cut(self, z: Optional[float]) -> None:
+        if z is None:
+            self.clip_label.setText("all")
+            self.clip_label.setStyleSheet("")
+            self.clip_label.setToolTip("")
+            self.viewport.set_clip(None)
+        else:
+            self.clip_label.setText(f"L {int(round(z / self.layer_height))} \u00b7 {z:.2f} mm")
+            # make an active cut obvious: the model looks sliced open otherwise
+            self.clip_label.setStyleSheet(f"color: {theme.CUT_ACTIVE}; font-weight: bold;")
+            self.clip_label.setToolTip(f"Cut active: everything above {z:.1f} mm is hidden "
+                                       "(display only). Drag the slider or scroll up to the top to show all.")
+            self.viewport.set_clip(z)
+
+    def reset_clip(self) -> None:
+        """Show the whole scene again (used when another model or project is loaded)."""
+        if self.clip_slider.value() != 1000:
+            self.clip_slider.setValue(1000)     # emits valueChanged -> _on_clip
+        else:
+            self._on_clip(1000)
+
+    def refresh_clip(self) -> None:
+        self._on_clip(self.clip_slider.value())

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.git/
+.codex/
+.agents/
+.env*
+test-results/
+playwright-report/
+public/runtime/
+public/mini-supports-source.zip
+**/__pycache__/
+**/.DS_Store

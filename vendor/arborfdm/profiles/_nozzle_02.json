@@ -1,0 +1,30 @@
+{
+  "abstract": true,
+  "label": "0.2 mm base",
+  "values": {
+    "nozzle_diameter": 0.2,
+    "overhang_angle_deg": 55.0,
+    "line_width": 0.22,
+    "layer_height": 0.08,
+    "tip_diameter": 0.26,
+    "tip_base_diameter": 0.7,
+    "tip_length": 1.2,
+    "island_anchor_height": 1.0,
+    "island_anchor_spacing": 1.0,
+    "island_tip_diameter": 0.6,
+    "tip_penetration": 0.03,
+    "branch_min_diameter": 0.9,
+    "branch_max_diameter": 1.8,
+    "trunk_diameter": 2.4,
+    "brace_diameter": 0.9,
+    "xy_clearance": 0.6,
+    "on_model_tip_diameter": 0.24,
+    "min_region_area": 0.06,
+    "foot_diameter": 6.0,
+    "collar_diameter": 3.2,
+    "raft_thickness": 0.16,
+    "raft_enabled": true,
+    "hollow_wall": 0.66,
+    "raft_release_gap": 0.08
+  }
+}

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.vercel/
+public/runtime/
+test-results/
+playwright-report/
+.DS_Store
+__pycache__/
+public/mini-supports-source.zip
+.vercel
