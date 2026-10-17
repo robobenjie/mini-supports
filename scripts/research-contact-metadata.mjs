@@ -1,0 +1,26 @@
+/** Add sidecar audit metadata only. Never rewrites plate layout, meshes or G-code. */
+import {readFile,writeFile} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
+import path from 'node:path';
+const folder=path.resolve(process.argv[2]||'test-results/research/print-kit');
+const manifestPath=path.join(folder,'plate-manifest.json'),manifestBytes=await readFile(manifestPath),plate=JSON.parse(manifestBytes);
+const add=(p,t)=>p.map((v,d)=>v+t[d]);
+const metadata={schemaVersion:1,sourcePlateManifest:manifestPath,sourcePlateManifestSha256:createHash('sha256').update(manifestBytes).digest('hex'),createdAt:new Date().toISOString(),coordinateFrame:'All contact, tip, parent, omitted-contact and issue positions below are in final plate XYZ millimetres. Generated model/support STL paths are in specimen bed frame; apply plateTranslationMm once.',interpretation:['Original-model and generated-support meshes are merged into each app-supported object before slicing. Their normal extrusion role labels do not distinguish the two materials/parts.','The real Arbor tips are inclined truncated cones. A cap is perpendicular to the parent-to-tip axis, not horizontal. Its center Z is not its upper rim Z.','Cap Z interval is the conservative continuous-circle bound; the actual 12-sided disk can have slightly less vertical extent.','Emitted paths near the tip are an occupancy check, not proof of a correctly separated model-to-support gap. Intersections and overlapping slicer offsets can make path attribution ambiguous.','A useful limited support-survival check is near the cone axis 1–2 actual layers below its lowest rim, ideally excluding positions occupied by the original model cross-section.','No-path above a cap upper rim is expected and cannot establish a vanished support. Missing crowns require inspecting the actual cap plane, slicer layer midplanes and emitted width.','Native-support rows have no expected Arbor caps. Inspect their native Support/Support interface roles and original-model start regions separately.'],specimens:[]};
+for(const row of plate.specimens.filter(s=>s.researchSummary)){
+ const summary=JSON.parse(await readFile(row.researchSummary,'utf8')),t=row.translation,native=row.settings?.enable_support==='1',nodes=new Map(summary.treeNodes.map(n=>[n.id,n]));
+ const record={id:row.id,assemblyIndex:row.assemblyIndex,label:row.label,nativeSupports:native,plateTranslationMm:t,sourceStlPath:summary.sourcePath,sourceSha256:summary.sourceSha256,originalModelBedStl:row.files.find(f=>path.basename(f)==='model.stl'),supportBedStl:native?null:row.files.find(f=>path.basename(f)==='supports.stl'),raftBedStl:native?null:row.files.find(f=>path.basename(f)==='raft.stl'),researchSummary:row.researchSummary,sourceRotationXYZDegrees:summary.rotationXYZ,sourceToBedTranslationMm:summary.translation.map((v,d)=>v+(d===2?summary.bedShift:0)),params:native?null:summary.params,originalGeometryIntegrity:summary.originalGeometryIntegrity??null,contacts:[],omittedContacts:[],warnings:[]};
+ if(!native){
+  record.warnings=summary.issues.filter(i=>i.severity!=='info').map(i=>({...i,positionPlateMm:i.position?add(i.position,t):null}));
+  for(const c of summary.contacts){
+   const node=summary.treeNodes.find(n=>n.kind==='tip'&&n.contact_id===c.id),parent=node?nodes.get(node.parent):null;
+   if(!c.routed||!node||!parent){record.omittedContacts.push({id:c.id,reason:c.reason,sourceContactPlateMm:add(c.position_bed_mm,t),failure:summary.treeFailed[String(c.id)]??'No routed tip node',projectionOriginalMinusProxyZMm:c.original_minus_proxy_z_mm});continue}
+   const center=add(node.position,t),parentPosition=add(parent.position,t),delta=center.map((v,d)=>v-parentPosition[d]),length=Math.hypot(...delta),normal=delta.map(v=>v/length),r=node.radius,dz=r*Math.sqrt(Math.max(0,1-normal[2]**2));
+   const originalSurfaceZ=c.original_vertical_surface_z_mm===null?null:c.original_vertical_surface_z_mm+summary.bedShift+t[2];
+   const belowZ=center[2]-dz-.12,axisAtBelow=normal[2]>0?center.map((v,d)=>v+normal[d]*(belowZ-center[2])/normal[2]):null;
+   record.contacts.push({id:c.id,reason:c.reason,note:c.note,kind:'inclined-cone-cap',sourceContactPlateMm:add(c.position_bed_mm,t),surfaceNormal:c.normal,originalVerticalSurfaceZMm:originalSurfaceZ,originalMinusProxyZMm:c.original_minus_proxy_z_mm,capCenterPlateMm:center,capPlaneUpwardNormal:normal,capRadiusMm:r,capCircleSegments:summary.params.circle_segments,capConservativeZIntervalMm:[center[2]-dz,center[2]+dz],parentPositionPlateMm:parentPosition,parentRadiusMm:parent.radius,tipSegmentLengthMm:length,axisTiltDegrees:Math.acos(Math.min(1,Math.max(-1,normal[2])))*180/Math.PI,exampleSupportOnlyProbePlateMm:axisAtBelow,probeCaveat:'Example 0.12mm below lowest rim; adjust to actual slice midplane and exclude original-model geometry before assigning support-only meaning.',nominalZGapParameterMm:summary.params.z_gap,nominalPenetrationParameterMm:summary.params.tip_penetration});
+  }
+ }
+ metadata.specimens.push(record);
+}
+const output=path.join(folder,'real-contact-metadata.json');await writeFile(output,JSON.stringify(metadata,null,2)+'\n');
+console.log(JSON.stringify({output,plateUnchanged:true,specimens:metadata.specimens.map(s=>({id:s.id,native:s.nativeSupports,contacts:s.contacts.length,omitted:s.omittedContacts.length}))},null,2));

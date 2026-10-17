@@ -1,0 +1,161 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-16",
+  "scope": "Read-only audit of vendored ArborFDM and the browser adapter; opt-in experiment ideas only. No algorithm, profile, UI, or deployment changes were made by this audit.",
+  "process_target": {"printer": "Bambu Lab A1", "nozzle_mm": 0.2, "layer_height_mm": 0.06, "material": "PLA Matte is a working assumption, not confirmed material calibration"},
+  "fair_assessment": "The premise that upstream lacks FDM knowledge is not established. It already uses layerwise island/overhang analysis, a line-width overlap cap, printable branch routing, FDM crown spacing, single-row narrow-blade contacts, raft release gaps, model-foot access checks, and support self-slicing. Tests refer to real 0.2 mm prints and Orca G-code observations. The issues below are specific limitations, not a judgment about the author's expertise.",
+  "existing_strengths": [
+    {"principle": "No branches steeper than the configured self-supporting route", "evidence": "tree.routing_angle_deg takes min(branch_angle_deg, overhang_angle_deg - 2). Default branch tilt 40 degrees from vertical; default surface threshold 55 gives a 53-degree cap.", "source": "vendor/arborfdm/arbor/engine/tree.py:151", "verification": "branch-angle-policy diagnostic passes"},
+    {"principle": "Do not let high angle settings allow an entire bead to float", "evidence": "analysis.max_layer_step caps angle-derived step at line_width, although the support-only checker does not yet share this cap.", "source": "vendor/arborfdm/arbor/engine/analysis.py:59"},
+    {"principle": "Anchor growing islands and avoid duplicate contact crowns", "evidence": "Mandatory island contacts and optional six-contact rings precede face fill. Ordinary contacts use max(min_contact_distance, tip_base_diameter + line_width). Narrow blades receive a single central row.", "sources": ["vendor/arborfdm/arbor/engine/contacts.py:515", "vendor/arborfdm/arbor/engine/contacts.py:768", "vendor/arborfdm/tests/test_tip_crowns.py:1"]},
+    {"principle": "Check real support mesh and removal risk", "evidence": "Checks include closed/winding-consistent support geometry, floating components, model overlap, layerwise support growth, slenderness, and removal access for supports standing on the model.", "source": "vendor/arborfdm/arbor/engine/verify.py:1025"}
+  ],
+  "browser_defaults": {
+    "profile": "nozzle_02_normal",
+    "nozzle_diameter_mm": 0.2,
+    "line_width_mm": 0.22,
+    "layer_height_mm": 0.08,
+    "ui_tip_z_gap_mm": 0.03,
+    "tip_penetration_mm": 0.03,
+    "tip_diameter_mm": 0.26,
+    "tip_base_diameter_mm": 0.7,
+    "tip_length_mm": 1.2,
+    "island_tip_diameter_mm": 0.6,
+    "contact_spacing_mm": 2.4,
+    "effective_minimum_ordinary_contact_distance_mm": 0.92,
+    "edge_spacing_mm": 1.6,
+    "branch_angle_degrees_from_vertical": 40,
+    "xy_clearance_mm": 0.6,
+    "raft_thickness_mm": 0.16,
+    "raft_release_gap_mm": 0.08,
+    "allow_on_model": true,
+    "analysis_simplification_target_mm": 0.02,
+    "sources": ["vendor/arborfdm/profiles/_nozzle_02.json", "vendor/arborfdm/profiles/nozzle_02_normal.json", "src/main.ts:35", "src/simplify.ts:2"]
+  },
+  "findings": [
+    {
+      "id": "layer-grid-mismatch",
+      "classification": "configuration and verification limitation",
+      "priority": "high",
+      "finding": "The browser analyzes 0.08 mm layers for the 0.2 nozzle while the proposed A1 process uses 0.06 mm. Neither the bridge nor the generic 3MF carries the actual first-layer height, variable layer schedule, wall generator, or extrusion-path rules into verification.",
+      "implication": "Contact survival and actual empty layers must be checked in the chosen Bambu process. Merely setting z_gap to a multiple of nominal layer height does not align an arbitrary contact surface or exported raft/lift frame to the final slicer grid.",
+      "sources": ["python/browser_engine.py:33", "vendor/arborfdm/arbor/engine/analysis.py:407", "vendor/arborfdm/arbor/engine/placement.py:42", "vendor/arborfdm/arbor/engine/pipeline.py:90"],
+      "test": "Record exact slicer layer heights, model first extrusion Z, last supporting extrusion Z, and top-contact path width/length for horizontal, sloped, and rounded underside coupons at several Z phases."
+    },
+    {
+      "id": "gap-contract",
+      "classification": "ambiguous user-facing parameter semantics, reproduced",
+      "priority": "high",
+      "finding": "For a cone, tip_center = contact - normal * tip_penetration - Z * z_gap. On a flat downward face, net vertical center gap is z_gap - tip_penetration. The browser's default 0.03 gap and profile 0.03 penetration cancel to zero net center gap.",
+      "sources": ["vendor/arborfdm/arbor/engine/tree.py:600", "src/main.ts:35"],
+      "diagnostic": "gap-contract",
+      "proposal": "Expose or document net geometric clearance explicitly. Any experimental clean-gap mode should set penetration to zero; retain the original settings as a labeled baseline."
+    },
+    {
+      "id": "inclined-tip-rim",
+      "classification": "geometric risk demonstrated by construction, not yet measured on a generated model",
+      "priority": "high",
+      "finding": "A cone's cap is perpendicular to its axis. A tip center 0.06 mm below a flat ceiling can still intersect it if a 0.26 mm tip is tilted 40 degrees: the cap's vertical radius is approximately 0.13*sin(40 degrees) = 0.084 mm. Center gap therefore does not guarantee minimum surface clearance. Tilting may occur to escape a nearby model wall.",
+      "sources": ["vendor/arborfdm/arbor/engine/build.py:34", "vendor/arborfdm/arbor/engine/tree.py:792"],
+      "proposal": "Research a vertical short printable neck with a horizontal cap, then taper into the existing angled branch. Verify the actual cap against the original mesh, not just its center. This is a proposed experiment, not implemented or proven."
+    },
+    {
+      "id": "short-support-single-gap",
+      "classification": "confirmed arithmetic bug",
+      "priority": "high",
+      "finding": "_short_support subtracts z_gap from the free height, then compares the result to layer_height + z_gap. The gap is effectively counted twice. At layer_height=0.06, z_gap=0.06, total height=0.15, the net 0.09 mm support region is rejected even though a 0.06 mm geometric layer can fit. This diagnostic uses the engine's ideal uniform layer grid, not a claim about the real A1 first layer.",
+      "sources": ["vendor/arborfdm/arbor/engine/tree.py:656", "vendor/arborfdm/arbor/engine/tree.py:738"],
+      "diagnostic": "short-support-single-gap",
+      "proposal": "Compare the net free height against one layer, or compare gross free height against one layer plus gap, exactly once. Apply any fix consistently to all matched experimental variants and record it. No fix was made during this research hold."
+    },
+    {
+      "id": "regional-coverage",
+      "classification": "checker blind spot, reproduced",
+      "priority": "high",
+      "finding": "_check_regions asks whether any routed contact lies within contact_spacing of the region polygon. One contact just outside a 20 x 20 mm island passes even though its opposite corner is over 28 mm away. Generation has denser placement logic, but a pass from this verifier is not a quantitative coverage guarantee.",
+      "source": "vendor/arborfdm/arbor/engine/verify.py:129",
+      "diagnostic": "regional-coverage",
+      "proposal": "Measure uncovered region area and maximum local unsupported span on actual layer paths. Treat new islands separately from anchored overhangs and legitimate two-sided bridges."
+    },
+    {
+      "id": "localized-collision",
+      "classification": "checker blind spot, reproduced with an adversarial checker-only fixture",
+      "priority": "high",
+      "finding": "Collision checking subtracts no spatial tip neighborhoods. It only compares total overlap volume against sum(tip-base-radius squared)*pi*(penetration+0.1)+0.2. A 2 mm3 intersection remote from 100 nominal contacts is allowed by that global budget. More contacts can therefore mask a local branch intrusion.",
+      "source": "vendor/arborfdm/arbor/engine/verify.py:282",
+      "diagnostic": "localized-collision",
+      "proposal": "Permit contact penetration only inside explicit local tip/pad masks; flag every other intersection. Test against original full-detail geometry before claiming collision clearance."
+    },
+    {
+      "id": "same-overlap-rule",
+      "classification": "confirmed analysis/checker inconsistency",
+      "priority": "medium",
+      "finding": "At 0.06 mm layers, 0.22 mm line width and an 80-degree threshold, model analysis permits a 0.22 mm horizontal step but support self-check permits 0.3403 mm. The latter reimplements the formula without the line-width cap. Default 55-degree behavior is unaffected by this particular discrepancy.",
+      "sources": ["vendor/arborfdm/arbor/engine/analysis.py:59", "vendor/arborfdm/arbor/engine/verify.py:352"],
+      "diagnostic": "same-overlap-rule",
+      "proposal": "Use the same maximum-layer-step helper in analysis and verification."
+    },
+    {
+      "id": "tiny-island-detection",
+      "classification": "analysis filtering limitation, not proof of missing final support",
+      "priority": "medium",
+      "finding": "A disconnected 0.2 x 0.2 x 0.18 mm floating feature is dropped by the 0.06 mm2 region-area threshold. Face/low-point placement can still rescue some cases, and a real slicer may itself drop such geometry. Every discarded island should be observable in the diagnostic report.",
+      "source": "vendor/arborfdm/arbor/engine/analysis.py:478",
+      "diagnostic": "tiny-island-detection",
+      "proposal": "Separate noise filtering from a small-feature review list; test several island sizes and orientations through actual Arachne extrusion paths."
+    },
+    {
+      "id": "proxy-versus-original",
+      "classification": "verification scope limitation",
+      "priority": "high",
+      "finding": "The engine analyzes and collision-checks the simplified proxy, then export restores original mesh detail. A 0.02 mm simplification target is materially large relative to a 0.03 or 0.06 mm contact gap. Meshoptimizer's target is not an independent signed surface-distance certificate.",
+      "sources": ["src/simplify.ts:2", "python/browser_engine.py:19", "src/plate.ts"],
+      "proposal": "Project candidate contacts to the original surface and verify local support clearance on the original before export; retain fast proxies for broad routing. Test tip and thin-blade preservation at multiple simplification targets."
+    },
+    {
+      "id": "detachability-check-scope",
+      "classification": "heuristic scope limitation",
+      "priority": "medium",
+      "finding": "Removal access ray checks apply only to supports rooted on the model. Bed-rooted trees trapped between limbs can escape this check. Thick island anchors are exempt from dense-mark warnings. Contact area sums node discs even when there is a positive gap, so it is neither real bonded area nor measured scar area.",
+      "source": "vendor/arborfdm/arbor/engine/verify.py:885",
+      "proposal": "Score tool access for every branch near the model and record physical removal time, broken details, residual stubs, and scar dimensions. A useful experimental preference is model-free roots where they are feasible without sacrificing island support."
+    }
+  ],
+  "historical_53_part_artifact": {
+    "source": "test-results/plate/generation.json",
+    "provenance_note": "Existing artifact read during audit, not rerun. Do not treat as current-commit validation or infer print success. It comes from the prior 53-part benchmark.",
+    "parts": 53,
+    "parts_with_error_severity_issues": 19,
+    "counts": {"unrouted_contact_errors": 53, "sub_layer_gap_warnings": 94, "invalid_model_mesh_warnings": 51, "hard_to_remove_warnings": 50, "collision_check_skipped_info": 4, "unsupported_region_warnings": 12, "isolated_tall_tree_warnings": 15, "fragile_support_warnings": 4, "support_floating_region_warnings": 1},
+    "meaning": "The benchmark shows generation completion and runtime; it does not establish adequate support coverage for the entire plate."
+  },
+  "metrics_interpretation": {
+    "contacts": "Placement candidates; may include unrouted contacts. Report routed and failed separately.",
+    "supportWatertight": "Closed support mesh topology. Does not prove slicer produces each contact or that branches resist nozzle forces.",
+    "validate_export": "Archive/XML/object geometry validity. Does not slice or test printed layer continuity.",
+    "contact_area_mm2": "Sum of nominal tip/pad discs; proxy only, not real contact, bond strength, visible scar area, or detach force.",
+    "support_volume_mm3": "Solid geometric volume; useful relative geometry cost. Actual slicer infill, wall count, extrusion width and path survival determine filament/time.",
+    "max_fragility": "Heuristic slenderness ratio normalized by chosen thresholds; not a force/material/cooling/acceleration model.",
+    "zero_errors": "No implemented geometric rule triggered. Not a print success proof, especially with skipped checks or simplified models."
+  },
+  "candidate_experiments_after_research": [
+    {"id": "E1", "name": "Process-matched gap calibration", "proposal": "Use 0.06 mm analysis layers and exact A1 slicer settings. Retain legacy gap/penetration baseline; compare explicit zero-penetration net gaps of 0.06 and 0.12 mm. Consider 0.18 only if removal or fusing warrants it.", "measure": "Actual top-support and first-model extrusion separation, underside sag, contact survival and removal damage."},
+    {"id": "E2", "name": "Printable flat-neck contacts", "proposal": "Compare current 0.26 mm angled cap against vertical necks around 0.40-0.44 mm diameter and 0.18 mm height, with the best gap from E1. The dimensions are test candidates tied to roughly two 0.22 mm lines, not a universal minimum.", "measure": "Does Bambu emit stable short paths at every intended tip; number of travel/retraction events; marks and detached details."},
+    {"id": "E3", "name": "Critical-island versus cosmetic-face contacts", "proposal": "Keep robust early-island anchors while reducing ordinary face contact density or preferring less visible sides. Test reducing 0.60 mm island tip diameter only after first-layer survival is verified.", "measure": "Failed early islands, damaged fingers/weapons, scar area and removal time, independently of material savings."},
+    {"id": "E4", "name": "Thin-blade perch or short contact rib", "proposal": "Compare isolated single-row tips to a very short removable rib/perch under a difficult thin blade, with explicit breakaway contact geometry. Existing engine already centers blade contacts; this investigates path continuity rather than merely adding density.", "measure": "Missing-tip count, stringing and sag beneath blade, tip survival in sliced paths, snap damage."},
+    {"id": "E5", "name": "Removal-aware placement and orientation", "proposal": "Compare fixed model orientations and route preferences that avoid model-foot anchors in enclosed gaps. Hold gap, cap and density fixed when evaluating orientation or root policy.", "measure": "Tool access, removal time, broken features, visible scars and support material. Do not choose the lightest support tree if it loses quality."}
+  ],
+  "critical_acceptance_tests": [
+    "Same original full-detail model geometry, orientation and scale across matched variants; support geometry is the only changing factor unless orientation is the named experiment.",
+    "Every meaningful first-extrusion island has an actual emitted support contact or verified bridge/anchorage path, not merely a nearby geometric tip.",
+    "Tip top survives slicing at target line width and wall generator; no new support path starts unsupported above the bed/model.",
+    "Support/model intersections are restricted to deliberately allowed local contact zones and measured against the original geometry.",
+    "Raft is on Z=0 after final export; actual gap and first-layer phase are measured in the final assembled 3MF, not only in per-mini engine frames.",
+    "No unreviewed hard errors or skipped collision checks in the selected print candidates; rejected candidates remain recorded with reasons.",
+    "Measure physical success, cleanup time and model damage after printing. A sliced-file pass is necessary evidence but cannot settle the quality hypothesis."
+  ],
+  "diagnostic_command": "node scripts/test-support-principles.mjs",
+  "strict_command": "node scripts/test-support-principles.mjs --strict",
+  "diagnostic_results": "research/principle-diagnostics.json",
+  "diagnostic_notes": "The diagnostics deliberately exercise checker-only edge cases and flag known limitations. Normal mode records them without failing the process; --strict returns nonzero until all principles pass. Seven checks ran: one satisfied and six known limitations. This is not a seven-case end-to-end model benchmark."
+}

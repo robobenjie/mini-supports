@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "layer_height_mm": 0.06,
+  "nozzle_mm": 0.2,
+  "checks": [
+    {
+      "id": "gap-contract",
+      "criterion": "A 0.03 mm requested gap means a 0.03 mm net vertical clearance on a flat underside",
+      "passed": false,
+      "observations": {
+        "requested_gap_mm": 0.03,
+        "penetration_mm": 0.03,
+        "actual_tip_center_gap_mm": 0,
+        "note": "This documents ambiguous legacy semantics, not a claim that all gaps are bad."
+      }
+    },
+    {
+      "id": "short-support-single-gap",
+      "criterion": "A 0.15 mm cavity with a 0.06 mm top gap leaves 0.09 mm, enough for one 0.06 mm support layer",
+      "passed": false,
+      "observations": {
+        "total_free_height_mm": 0.15,
+        "net_height_mm": 0.09,
+        "failures": {
+          "0": "only 0.15 mm free under the contact (surface of the build plate below): less than one layer (+ z_gap) = 0.12 mm, no support can be printed there"
+        }
+      }
+    },
+    {
+      "id": "regional-coverage",
+      "criterion": "An island 20 x 20 mm with only one off-edge contact must fail coverage",
+      "passed": false,
+      "observations": {
+        "island_area_mm2": 400,
+        "contacts": 1,
+        "largest_xy_distance_mm": 28.64000698323937,
+        "issues": []
+      }
+    },
+    {
+      "id": "localized-collision",
+      "criterion": "A 2 mm3 support intrusion unrelated to contact neighborhoods must be reported",
+      "passed": false,
+      "observations": {
+        "collision_mm3": 2,
+        "unrelated_contacts": 100,
+        "issues": [],
+        "note": "Adversarial checker-only fixture: the contacts are intentionally remote to test locality, not a normal generated tree."
+      }
+    },
+    {
+      "id": "same-overlap-rule",
+      "criterion": "Model and support analysis must share the line-width-capped maximum layer step",
+      "passed": false,
+      "observations": {
+        "analysis_step_mm": 0.22,
+        "legacy_support_step_mm": 0.3402769091770624,
+        "cap_source": "line_width"
+      }
+    },
+    {
+      "id": "tiny-island-detection",
+      "criterion": "A disconnected 0.2 x 0.2 mm feature must be surfaced for review even below region-area filtering",
+      "passed": false,
+      "observations": {
+        "n_islands": 0,
+        "small_islands_dropped": 1,
+        "area_mm2": 0.04,
+        "note": "Toolpath survival still depends on variable-line-width settings. This tests detection only, not final contact placement."
+      }
+    },
+    {
+      "id": "branch-angle-policy",
+      "criterion": "Routing tilt stays below the configured branch angle and printable surface angle",
+      "passed": true,
+      "observations": {
+        "routing_angle_deg": 40,
+        "branch_angle_deg": 40,
+        "printable_angle_deg": 53
+      }
+    }
+  ]
+}
