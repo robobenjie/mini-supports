@@ -1,0 +1,229 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-18T20:53:49.833Z",
+  "candidateId": "spore-E3",
+  "status": "Accepted for a physical research comparison after scoped final-file digital checks; not a print-success claim",
+  "physicalPrintPerformed": false,
+  "printerJobSent": false,
+  "experimentalCodeDeployed": false,
+  "comparison": {
+    "customSpecimen": "H0",
+    "referenceSpecimen": "N5",
+    "referenceSupport": "Bambu normal(auto), snug",
+    "sameOriginalGeometryAndPose": true,
+    "sameProcess": true,
+    "calibrationPlate": "Existing 21-specimen plate remains unchanged"
+  },
+  "process": {
+    "application": "Bambu Studio 02.04.00.70",
+    "source": "installed GUI final export",
+    "wallGenerator": "classic",
+    "finalUsesArachne": false,
+    "printer": "Bambu Lab A1",
+    "nozzleMm": 0.2,
+    "layerHeightMm": 0.06,
+    "firstLayerHeightMm": 0.1,
+    "materialPreset": "Bambu PLA Matte @BBL A1 0.2 nozzle",
+    "materialAndPlateAreAssumed": true,
+    "plate": "Textured PEI Plate",
+    "nozzleC": 220,
+    "bedC": 65
+  },
+  "estimate": {
+    "seconds": 17502,
+    "display": "4h 51m 42s",
+    "filamentGrams": 9.78
+  },
+  "exports": {
+    "editable": {
+      "file": "A1-02-spore-comparison.3mf",
+      "sha256": "aba7f0f2bd7e4e7f5b2d88ed43161b7952334459e7cd4da1eb9759937c0b8c85",
+      "bytes": 12054989
+    },
+    "printOnly": {
+      "file": "A1-02-spore-comparison.gcode.3mf",
+      "sha256": "e5fca9584b309a619ad253b43d5e567c4fba052d9154a475679fd71bc1e3fa3e",
+      "bytes": 10643768
+    }
+  },
+  "gcodeSha256": "2f193a8f54f445e9df1f14e226a270244d7920c570a443316dff78a3f6b57575",
+  "validationRecordSha256": "42bf0e3ef8f466753f826f0bf7425f236b429f6fd6909f24cd0f60a6e0d4f226",
+  "plateManifestSha256": "6014f860e361bc04c49bf53a6e01a5c3d1a8a5c3bc826dbfaef9bc3c61a7c36c",
+  "sourceCode": {
+    "engineArchiveSha256": "9933f2e15831a63e34cdd8a32b36aa0e6c3fd81c7f690d099658c3bf526df763",
+    "generatorSha256": "cc454f35e009fcb1c743be68e22ef862d9c26b9e037bc22efb5a4f46c053a3fb"
+  },
+  "originalGeometry": {
+    "copies": 2,
+    "trianglesPerCopy": 300056,
+    "analysisResolution": "original full-resolution mesh",
+    "fullOrientedTriangleCheckPassed": true,
+    "coordinateToleranceMm": 2e-05,
+    "maxCoordinateDifferenceMm": 7.320019534517996e-06,
+    "preservesFaceMultiplicityAndWinding": true
+  },
+  "generation": {
+    "elapsedSeconds": 21.181186125,
+    "contacts": 81,
+    "routed": 78,
+    "omittedSubLayerContacts": [
+      31,
+      36,
+      37
+    ],
+    "engineErrors": 0,
+    "engineWarnings": 11,
+    "supportClosed": true,
+    "originalCollisionMeasured": true,
+    "outsideContactCollisionVolumeMm3": 0,
+    "outsideContactAcceptanceThresholdMm3": 1e-05,
+    "totalSupportModelIntersectionVolumeMm3": 0.0019022133636118913,
+    "routingRetries": [
+      {
+        "contact_id": 1,
+        "attempts": 1,
+        "accepted": true
+      },
+      {
+        "contact_id": 20,
+        "attempts": 1,
+        "accepted": true
+      },
+      {
+        "contact_id": 48,
+        "attempts": 9,
+        "accepted": true
+      }
+    ]
+  },
+  "shortContactFitting": {
+    "contacts": 19,
+    "fitted": 18,
+    "preferredWidthMm": 0.28,
+    "preferredWidthMet": 17,
+    "narrowerValidatedFallbacks": [
+      {
+        "contactId": 35,
+        "actualWidthConstraintMm": 0.22,
+        "reason": "The requested cap projects to less than the required fit width"
+      }
+    ],
+    "unfittedLegacyFallbacks": [
+      {
+        "contactId": 63,
+        "reason": "No collision-free, one-line-wide, one-layer-high short contact fits the bounded neighbourhood at the requested top gap",
+        "actualRootExtrusionChecked": true,
+        "completeRequestedGeometricClearanceProven": false
+      }
+    ]
+  },
+  "finalActualPathChecks": {
+    "auditMode": "full-starts-and-contacts",
+    "gcodeHashMatchesDeliveredArchive": true,
+    "custom": {
+      "bedStarts": 1,
+      "aboveBedStarts": 17,
+      "startsWithSupportWitness": 17,
+      "startsWithoutSupportWitness": 0,
+      "modelStartScreenFlags": 3,
+      "modelRoots": 33,
+      "modelRootScreenFlags": 0,
+      "plannedTipNecks": 78,
+      "screenableTipNecks": 69,
+      "tipNeckScreenFlags": 0,
+      "capSameLayerOverlapFlags": 0,
+      "inspectionFlags": 3
+    },
+    "native": {
+      "bedStarts": 1,
+      "supportedStartWitnesses": 17,
+      "startFlags": 0,
+      "inspectionFlags": 0
+    },
+    "unscreenableShortTips": 9,
+    "unscreenableTipCondition": "Each has a direct model-root parent with an independently checked emitted neck and foundation",
+    "reviewedFlags": [
+      {
+        "kind": "model-start",
+        "startIndex": 5,
+        "nearestOverlapFraction": 0.048294006355422955,
+        "nearestNominalEnvelopeGapMm": 0.060000000000002274,
+        "lowerOverlapFraction": 0.4315783998648294,
+        "lowerNominalEnvelopeGapMm": 0.120000000000001,
+        "disposition": "accepted-for-research-print; retain sag and adhesion question"
+      },
+      {
+        "kind": "model-start",
+        "startIndex": 6,
+        "nearestOverlapFraction": 0.0361655211522289,
+        "nearestNominalEnvelopeGapMm": 0.060000000000002274,
+        "lowerOverlapFraction": 0.4370644750159333,
+        "lowerNominalEnvelopeGapMm": 0.120000000000001,
+        "disposition": "accepted-for-research-print; retain sag and adhesion question"
+      },
+      {
+        "kind": "model-start",
+        "startIndex": 7,
+        "nearestOverlapFraction": 0.022081961285252565,
+        "nearestNominalEnvelopeGapMm": 0.060000000000002274,
+        "lowerOverlapFraction": 0.36268816915381785,
+        "lowerNominalEnvelopeGapMm": 0.120000000000001,
+        "disposition": "accepted-for-research-print; retain sag and adhesion question"
+      }
+    ]
+  },
+  "diagnosticHistory": {
+    "E1": "Routing recovered all 78 printable contacts; eight local cap-neighborhood overlap flags motivated finite-width fitting.",
+    "E2Classic": "Two short model-root necks had no emitted support paths, despite witnesses for all 17 model starts; rejected.",
+    "E2Arachne": "Recovered one root; the other failed its early-foundation check; diagnostic only.",
+    "E3Classic": "The wider generic fitting preference preserved both missing roots in the installed-GUI Classic slice. Final acceptance uses this exact Classic export."
+  },
+  "warnings": {
+    "slicer": [
+      {
+        "msg": "bed_temperature_too_high_than_filament",
+        "level": "3",
+        "error_code": "1000C001"
+      },
+      {
+        "msg": "not_support_traditional_timelapse",
+        "level": "2",
+        "error_code": "10018003"
+      },
+      {
+        "msg": "not_support_traditional_timelapse",
+        "level": "3",
+        "error_code": "1000C003"
+      }
+    ],
+    "engineCountsByCode": {
+      "sub_layer_gap": 3,
+      "short_contact_fit_failed": 1,
+      "unsupported_region": 2,
+      "fragile_support": 1,
+      "hard_to_remove": 3,
+      "support_floating_region": 1
+    }
+  },
+  "knownLimits": [
+    "These are digital checks for an experimental print, not proof of adhesion, strength, surface quality or clean removal.",
+    "The first-emission audit excludes connected expanding overhangs and established bridges. Three sub-layer contacts near the base remain explicitly omitted.",
+    "9 very short cavity contacts lack a long pre-cap neck to audit separately; their model-root extrusion checks and local contact review remain explicit.",
+    "Short model-root supports attach directly to the miniature. They may leave pits or pull off surface detail during removal; no positive bottom release gap is designed into H0.",
+    "One shallow cavity (contact 63) retains its original short pillar because the finite-width fitter found no solution. Its actual extrusion and model foundation pass the path check, but its complete requested geometric clearance is not proven.",
+    "One long contact (26) retains about 0.0046 mm sampled local rim penetration. Total measured support/model intersection is about 0.00190 mm\u00b3, confined to contact neighborhoods; clean release at every tip is not established.",
+    "The engine still warns about two small near-base overhang regions, a 23.7 mm tall support on a 0.24 mm model pad, inaccessible/wedged cavity contacts, and a 0.06 mm\u00b2 support overhang across one layer near Z28.89. These are retained strength, sag and removal questions for this challenge print.",
+    "The minimum 5% nearest-start-overlap screen is an inspection heuristic, not a calibrated print-success threshold. The three remaining sliver flags have 36\u201344% support overlap one layer lower and stay visible in the review.",
+    "Classic and Arachne diagnostics are preserved locally. Only the supplied installed-GUI Classic export passed the complete final audit; results from another profile or re-slice must not be assumed identical.",
+    "Nominal bead footprints and layer-envelope gaps are not measured molten-bead air gaps.",
+    "This compares the complete custom support package with native normal/snug supports. Individual improvement attribution comes from the separate coupon study.",
+    "The original 21-specimen plate remains unchanged. No experimental algorithm changes have been deployed."
+  ],
+  "genericRegressionCommands": [
+    "node scripts/test-model-landings.mjs",
+    "node scripts/test-model-root-planes.mjs",
+    "node scripts/test-short-contact-fit.mjs",
+    "node scripts/research-custom-islands.mjs --self-test",
+    "python3 scripts/research-original-geometry.py --self-test"
+  ]
+}

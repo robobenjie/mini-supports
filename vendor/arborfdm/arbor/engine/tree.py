@@ -466,7 +466,12 @@ def build_tree(mesh: trimesh.Trimesh, contacts: list[Contact], params: SupportPa
     if model_on_raft(params):
         _model_outline(tree, mesh, params)
     contacts = [c for c in contacts if c.enabled]
+    tree.contact_normals = {}
     for c in contacts:
+        normal = np.asarray(c.normal, float)
+        length = float(np.linalg.norm(normal))
+        if length > 1e-12:
+            tree.contact_normals[c.id] = normal / length
         c.rests_on_model = False
     if contacts:
         router = _Router(mesh, contacts, params, tree, progress)
@@ -492,6 +497,7 @@ class _Router:
         self.r_trunk = params.trunk_diameter / 2
         self.r_tipbase = params.tip_base_diameter / 2
         self.hard = 0.1  # mm: minimum gap between a branch surface and the model
+        self._failed_route_contacts: set[int] = set()
 
     # -- setup ----------------------------------------------------------------
     def run(self) -> None:
@@ -503,6 +509,7 @@ class _Router:
         self._route()
         prog.update(0.9, "Braces")
         self._cleanup()
+        self._retry_failed_tips()
         self._limit_widening()
         self._stabilize_feet()
         if P.braces_enabled:
@@ -747,6 +754,22 @@ class _Router:
             tree.failed[c.id] = (f"only {pos[2] - floor_z:.2f} mm above the model: a short support "
                                  f"would stand on the model and supports on the model are disabled")
             return
+        if not on_plate and getattr(P, "fit_short_contacts", False):
+            # Import here: build imports routing constants from this module.
+            from .build import fit_short_contact, trimesh_to_manifold
+            if not hasattr(self, "_fit_model_manifold"):
+                self._fit_model_manifold = trimesh_to_manifold(self.mesh)
+            fitted = fit_short_contact(self.mesh, pos, n, tip_r, floor_z, P,
+                                       self._fit_model_manifold)
+            fitted["contactId"] = int(c.id)
+            if not hasattr(tree, "short_contact_fits"):
+                tree.short_contact_fits = []
+            tree.short_contact_fits.append(fitted)
+            if fitted["status"] == "fitted":
+                f = tree.add(fitted["rootPosition"], fitted["rootRadius"], NodeKind.MODEL_FOOT)
+                tree.add(fitted["tipPosition"], fitted["tipRadius"], NodeKind.TIP,
+                         parent=f.id, contact_id=c.id)
+                return
         tip_pos = pos - n * P.tip_penetration - np.array([0.0, 0.0, P.z_gap])
         tip = tree.add(tip_pos, tip_r, NodeKind.TIP, contact_id=c.id)
         frac = min(1.0, max(gap, 0.0) / max(P.tip_length, 1e-6))
@@ -973,6 +996,8 @@ class _Router:
             # model-mode node: land on the model when it gets close above it
             if not plate_ok[a] and P.allow_on_model:
                 topz = self.grid.top_below(xy[a], pos[a, 2])
+                if topz is not None:
+                    topz = self._ray_down(pos[a])
                 land_len = P.tip_length + 2 * rn[a]
                 if topz is not None and pos[a, 2] - topz <= land_len + dz and \
                         self._land_path_clear(nid, xy[a], pos[a, 2], topz):
@@ -1062,8 +1087,9 @@ class _Router:
 
         Slab distances cannot be used here: they include the landing surface itself.
         Exact triangle-plane sections instead catch a nearby slope or lip entering
-        the thin neck. The envelope matches build.at_root_plane; checking its full
-        disk is conservative where the emitted tube occupies only part of it.
+        the thin neck. For compact horizontal rings, intersect the vertical root
+        envelope with the inclined tube envelope, as build.at_root_plane does.
+        Testing the whole vertical disk alone rejects space the tube never uses.
         """
         from .build import joint_radius_factors
         P = self.P
@@ -1077,15 +1103,23 @@ class _Router:
         f_junction, f_bend = joint_radius_factors(P)
         upper_xy = xy if intermediate else node.position[:2]
         upper_r = max(self.r_min, self.r_tipbase) if intermediate else node.radius
-        factor = f_bend if intermediate or len(self.tree.children()[nid]) <= 1 else f_junction
+        junction = not intermediate and len(self.tree.children()[nid]) > 1
+        factor = f_junction if junction else f_bend
         upper = float(np.linalg.norm(upper_xy - xy)) + upper_r * factor
         slope = math.tan(math.radians(min(self.angle_print, float(P.branch_angle_deg))))
         neck = min(float(P.tip_length), height - (upper - radius) / max(slope, 1e-9))
         envelope = neck >= P.layer_height and 2.0 * radius >= P.line_width
+        compact = bool(getattr(P, "compact_junctions", False))
+        # Circumscribe the horizontal polygon rings and the compact shoulder
+        # hull. Its +/-0.001mm axial ring thickness slightly expands this bound.
+        compact_upper = upper_r * 1.001 / math.cos(math.pi / int(P.circle_segments))
+        if junction:
+            compact_upper *= max(1.0, P.junction_radius_factor)
+        axial_pad = 0.001 * (float(np.linalg.norm(upper_xy-xy)) + abs(compact_upper-radius)) / max(height, 1e-9)
         # Initialize the exact triangles already shared with short-gap ray tests.
         self._ray_down(np.array([xy[0], xy[1], shoulder]))
         neck_clearance = max(0.0, float(P.model_neck_clearance))
-        reach = max(radius, upper) + neck_clearance
+        reach = max(radius, upper, float(np.linalg.norm(upper_xy-xy)) + compact_upper) + neck_clearance + axial_pad
         lo, hi = self._tri_lo, self._tri_hi
         relevant = ((hi[:, 0] >= xy[0] - reach) & (lo[:, 0] <= xy[0] + reach) &
                     (hi[:, 1] >= xy[1] - reach) & (lo[:, 1] <= xy[1] + reach))
@@ -1098,22 +1132,44 @@ class _Router:
         a2 = (x[:, 1]-x[:, 0])*(y[:, 2]-y[:, 0])-(x[:, 2]-x[:, 0])*(y[:, 1]-y[:, 0])
         good = np.abs(a2) > 1e-14
         x, y, tz, a2 = x[good], y[good], tz[good], a2[good]
-        w0 = ((x[:, 1]-xy[0])*(y[:, 2]-xy[1])-(x[:, 2]-xy[0])*(y[:, 1]-xy[1])) / a2
-        w1 = ((x[:, 2]-xy[0])*(y[:, 0]-xy[1])-(x[:, 0]-xy[0])*(y[:, 2]-xy[1])) / a2
-        w2 = 1-w0-w1
-        hit = (w0 >= -1e-9) & (w1 >= -1e-9) & (w2 >= -1e-9)
-        crossings = np.unique(np.round((w0*tz[:, 0]+w1*tz[:, 1]+w2*tz[:, 2])[hit], 9))
         start = topz + max(P.layer_height, 0.02) + 1e-6
         if start >= shoulder:
             return True
         step = max(0.01, min(P.layer_height / 2.0, 0.05))
         for qz in np.linspace(start, shoulder, max(2, int(math.ceil((shoulder-start)/step))+1)):
+            clearance = neck_clearance * min(1.0, (qz-topz) / max(P.layer_height, 0.02))
+            r = radius + slope * max(0.0, qz-floor-neck) if envelope else upper
+            disks = [(xy, r+clearance)]
+            if compact:
+                u = np.clip((qz-floor)/max(height, 1e-9), 0.0, 1.0)
+                moving_xy = xy+u*(upper_xy-xy)
+                moving_r = radius+u*(compact_upper-radius)+axial_pad+clearance
+                # Without a printable vertical neck, the builder emits only
+                # the inclined compact tube/hull in this span.
+                disks = disks+[(moving_xy, moving_r)] if envelope else [(moving_xy, moving_r)]
+            witness = disks[0][0]
+            if len(disks) == 2:
+                c0, r0 = disks[0]
+                c1, r1 = disks[1]
+                delta = c1-c0
+                distance = float(np.linalg.norm(delta))
+                if distance > r0+r1:
+                    continue
+                if distance > 1e-12:
+                    # Midpoint of the circles' common interval on their centre
+                    # line is inside both, even for a thin lens intersection.
+                    along = 0.5*(max(-r0, distance-r1)+min(r0, distance+r1))
+                    witness = c0+delta*(along/distance)
+            # A surface boundary need not pass near a section fully contained
+            # in model material. Test one point inside the convex section too.
+            wx, wy = witness
+            w0 = ((x[:, 1]-wx)*(y[:, 2]-wy)-(x[:, 2]-wx)*(y[:, 1]-wy)) / a2
+            w1 = ((x[:, 2]-wx)*(y[:, 0]-wy)-(x[:, 0]-wx)*(y[:, 2]-wy)) / a2
+            w2 = 1-w0-w1
+            hit = (w0 >= -1e-9) & (w1 >= -1e-9) & (w2 >= -1e-9)
+            crossings = np.unique(np.round((w0*tz[:, 0]+w1*tz[:, 1]+w2*tz[:, 2])[hit], 9))
             if np.count_nonzero(crossings < qz) % 2:
                 return False
-            r = radius + slope * max(0.0, qz-floor-neck) if envelope else upper
-            # Ramp the hard clearance over one layer; the requested surface
-            # contact is intentional, all material above it must separate.
-            r += neck_clearance * min(1.0, (qz-topz) / max(P.layer_height, 0.02))
             t = tri[(tri[:, :, 2].min(axis=1) < qz) & (tri[:, :, 2].max(axis=1) > qz)]
             if not len(t):
                 continue
@@ -1131,8 +1187,20 @@ class _Router:
             pts = np.array([entry[1] for entry in points]).reshape(-1, 2, 2)
             a, b = pts[:, 0], pts[:, 1]
             v = b-a
-            u = np.clip(np.einsum('ij,ij->i', xy-a, v) / np.maximum(np.einsum('ij,ij->i', v, v), 1e-20), 0, 1)
-            if np.any(np.linalg.norm(a+u[:, None]*v-xy, axis=1) < r-1e-9):
+            length2 = np.maximum(np.einsum('ij,ij->i', v, v), 1e-20)
+            t_low, t_high = np.zeros(len(a)), np.ones(len(a))
+            for center, disk_r in disks:
+                offset = a-center
+                linear = np.einsum('ij,ij->i', offset, v)
+                constant = np.einsum('ij,ij->i', offset, offset)-disk_r*disk_r
+                discriminant = linear*linear-length2*constant
+                half = np.sqrt(np.maximum(discriminant, 0))
+                t_low = np.maximum(t_low, (-linear-half)/length2)
+                t_high = np.minimum(t_high, (-linear+half)/length2)
+                t_low[discriminant < 0] = 2.0
+            # A model boundary intersects the support only where its segment
+            # lies within every bounding disk, not in their union.
+            if np.any(t_low < t_high-1e-9):
                 return False
         return True
 
@@ -1247,6 +1315,7 @@ class _Router:
                     n = tree.nodes[i]
                     if n.kind == NodeKind.TIP and n.contact_id is not None:
                         tree.failed[n.contact_id] = self.fail_nodes.get(r, "could not be routed")
+                        self._failed_route_contacts.add(n.contact_id)
                     del tree.nodes[i]
         model_roots = {i for i, n in tree.nodes.items() if n.kind == NodeKind.MODEL_FOOT}
         by_id = {c.id: c for c in self.contacts}
@@ -1256,6 +1325,87 @@ class _Router:
         for cid, why in tree.failed.items():
             if cid in by_id:
                 by_id[cid].rests_on_model = False
+
+    def _retry_failed_tips(self) -> None:
+        """Retry failed routes from a few alternate tip axes, preserving good trees.
+
+        Base clearance alone cannot predict whether a tip can leave a tight pocket.
+        Only failed routes pay for this bounded search; every candidate runs the
+        same branch and landing checks against the existing prepared model grid.
+        """
+        P, tree = self.P, self.tree
+        failed = [c for c in self.contacts if c.id in self._failed_route_contacts and c.id in tree.failed]
+        if not failed:
+            return
+        saved = (self.contacts, self.pending, self.landed, self.fail_nodes,
+                 set(self._failed_route_contacts))
+        tree.routing_retries = []
+        try:
+            for contact in failed:
+                pos = np.asarray(contact.position, float)
+                normal = np.asarray(contact.normal, float).copy()
+                normal_length = float(np.linalg.norm(normal))
+                normal = normal / normal_length if normal_length > 1e-12 else np.array([0.0, 0.0, -1.0])
+                tip_r = (contact.tip_diameter or P.tip_diameter) / 2.0
+                rb = self.tip_base_r(tip_r)
+                original = self._tip_dir(pos, normal)
+                preferred = tip_direction(normal, self.angle)
+                directions = [np.array([0.0, 0.0, -1.0])]
+                for fraction in (0.25, 0.5, 0.75, 1.0):
+                    theta = fraction * math.radians(self.angle)
+                    for azimuth in np.arange(24) * 2 * math.pi / 24:
+                        directions.append(np.array([math.sin(theta)*math.cos(azimuth),
+                                                    math.sin(theta)*math.sin(azimuth), -math.cos(theta)]))
+                candidates = []
+                for direction in directions:
+                    if np.dot(direction, original) > 1.0-1e-9:
+                        continue
+                    clearance = self._base_clearance(pos, direction)
+                    if clearance < rb+self.hard:
+                        continue
+                    score = min(clearance, P.xy_clearance+self.r_min)+0.05*float(np.dot(direction, preferred))
+                    candidates.append((score, direction))
+                candidates.sort(key=lambda row: -row[0])
+                attempts, accepted = 0, False
+                # A failed surface contact must not make an entire plate stall.
+                # The best sixteen clear axes cover a full turn at several tilts.
+                for _, direction in candidates[:16]:
+                    attempts += 1
+                    trial = SupportTree()
+                    _init_tree_extras(trial, tree.z_base)
+                    base = pos+direction*P.tip_length
+                    tip_pos = pos+normal*(tip_r-P.tip_penetration) if P.tip_shape == "ball" else pos-normal*P.tip_penetration
+                    tip_pos = tip_pos-np.array([0.0, 0.0, P.z_gap])
+                    if base[2] <= tree.z_base or base[2] >= tip_pos[2]:
+                        continue
+                    tip = trial.add(tip_pos, tip_r, NodeKind.TIP, contact_id=contact.id)
+                    branch = trial.add(base, rb, NodeKind.BRANCH, contact_id=contact.id)
+                    tip.parent = branch.id
+                    kb = self._base_level(base[2])
+                    move = (base[2]-(self.zb+kb*self.dz))*self.tan
+                    self.tree, self.contacts = trial, [contact]
+                    self.pending = [(kb, branch.id, move, max(self.r_min, rb))]
+                    self._route()
+                    self._cleanup()
+                    if contact.id in trial.failed or not trial.nodes:
+                        continue
+                    mapping = {}
+                    for old, node in trial.nodes.items():
+                        mapping[old] = tree.add(node.position.copy(), node.radius, node.kind,
+                                                contact_id=node.contact_id).id
+                    for old, node in trial.nodes.items():
+                        tree.nodes[mapping[old]].parent = mapping.get(node.parent)
+                    for old, radius in trial.foot_radius.items():
+                        tree.foot_radius[mapping[old]] = radius
+                    tree.failed.pop(contact.id, None)
+                    accepted = True
+                    break
+                tree.routing_retries.append({"contact_id": contact.id, "attempts": attempts,
+                                             "accepted": accepted})
+                self.tree = tree
+        finally:
+            self.tree = tree
+            self.contacts, self.pending, self.landed, self.fail_nodes, self._failed_route_contacts = saved
 
     # -- printable radii -----------------------------------------------------------
     def _limit_widening(self) -> None:

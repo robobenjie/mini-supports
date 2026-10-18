@@ -1,6 +1,6 @@
 /** Limited original-model island-start audit. No geometry, layout or G-code mutations. */
 import {GcodeParser} from './research-toolpaths.mjs';
-import {createReadStream} from 'node:fs';
+import {Readable} from 'node:stream';
 import {readFile,writeFile} from 'node:fs/promises';
 import {createInterface} from 'node:readline';
 import {createHash} from 'node:crypto';
@@ -14,9 +14,11 @@ const manifestBytes=await readFile(path.join(folder,'plate-manifest.json')),mani
 const specimen=manifest.specimens.find(s=>s.id==='N5');
 if(!specimen)throw Error('N5 native held-out miniature is required.');
 const gcodePath=path.resolve(process.argv[3]||path.join(folder,'gui-sliced/plate_1.gcode')),hash=bytes=>createHash('sha256').update(bytes).digest('hex');
-const gcodeHash=createHash('sha256');for await(const chunk of createReadStream(gcodePath))gcodeHash.update(chunk);
+// Hash, resolve object IDs and run every parser against the same immutable bytes.
+// A slicer may overwrite the path during a long audit.
+const gcodeBytes=await readFile(gcodePath),gcodeHash=hash(gcodeBytes);
 // The slicer identifies objects in assembly order; derive the IDs from its header, never assume 730.
-const header=(await readFile(gcodePath)).subarray(0,12000).toString();
+const header=gcodeBytes.subarray(0,12000).toString();
 const labelIds=header.match(/; model label id:\s*([\d,]+)/)?.[1].split(',');
 const objectId=labelIds?.[specimen.assemblyIndex-1];
 if(!objectId)throw Error('Cannot resolve N5 object ID from G-code header.');
@@ -29,7 +31,7 @@ const parser=new GcodeParser(s=>{
  const row=[s.b[2],s.a[0],s.a[1],s.b[0],s.b[1],s.width,s.height,s.line,/^support(?:\s|$)/i.test(s.role)?1:0];
  active.set(row,used);used+=9;count++;
 });
-for await(const line of createInterface({input:createReadStream(gcodePath),crlfDelay:Infinity}))parser.feed(line);
+for await(const line of createInterface({input:Readable.from([gcodeBytes]),crlfDelay:Infinity}))parser.feed(line);
 if(parser.errors.length)throw Error(JSON.stringify(parser.errors));
 chunks.push(active.subarray(0,used));const segmentBytes=Buffer.concat(chunks.map(c=>Buffer.from(c.buffer,c.byteOffset,c.byteLength)));
 console.log(`Auditing N5 object ${objectId}: ${count} emitted path segments.`);
@@ -132,7 +134,7 @@ for layer_index,(z,height,model_paths) in enumerate(model_layers):
     prev=current
 json.dumps(dict(original_triangles=len(mesh.faces),original_coordinate_welded_vertices=len(mesh.vertices),original_trimesh_watertight=bool(mesh.is_watertight),original_manifold_status=str(solid.status()),model_layers=len(model_layers),model_empty_sections=empty_slices,geometric_births=len(births),tiny_geometric_births_under_001_mm2=tiny_births,geometric_birth_records=births,printed_component_starts=starts))
 `));
-const report={schemaVersion:1,createdAt:new Date().toISOString(),specimenId:'N5',objectId,sourceManifestSha256:hash(manifestBytes),gcodePath,gcodeSha256:gcodeHash.digest('hex'),originalModelPath:modelPath,originalModelSha256:hash(modelBytes),plateTranslationMm:specimen.translation,scope:'Limited first-emission witness audit for original-model section components; not an exhaustive support-coverage or physical-print validation.',method:['Slice the unsimplified original at actual model-role layer midplanes on the validated fixed layer grid (.10mm first/.06mm regular); never use native support intermediate Z or bridge bead HEIGHT as a model slice thickness.','Track section-component ancestry across consecutive model layers. A component with no previously printed ancestor is checked when at least 0.015mm of actual model extrusion centerline first overlaps it (0.001mm geometric tolerance). Tiny geometric births without emitted paths do not become failed printed starts.','At each above-bed first-emission component, intersect its geometry and model bead footprint with native support/interface path footprints from the previous 0.5mm of Z. Bead footprints use commanded nominal line width.','Native support witness means positive overlap beneath some emitted path; it does not establish adequate contact area or support for the complete island. The nominal layer-envelope gap is not a measured physical air gap.'],limitations:['Connected expanding overhangs and bridges are outside this island-start test.','Model components that separate after inheriting printed ancestry are not new starts.','Slicer bead shape, sag, cooling, adhesion and removal require a real print.','A no-witness result is an audit flag for inspection, not proof that printing must fail.'],...audit};
+const report={schemaVersion:1,createdAt:new Date().toISOString(),specimenId:'N5',objectId,sourceManifestSha256:hash(manifestBytes),gcodePath,gcodeSha256:gcodeHash,originalModelPath:modelPath,originalModelSha256:hash(modelBytes),plateTranslationMm:specimen.translation,scope:'Limited first-emission witness audit for original-model section components; not an exhaustive support-coverage or physical-print validation.',method:['Slice the unsimplified original at actual model-role layer midplanes on the validated fixed layer grid (.10mm first/.06mm regular); never use native support intermediate Z or bridge bead HEIGHT as a model slice thickness.','Track section-component ancestry across consecutive model layers. A component with no previously printed ancestor is checked when at least 0.015mm of actual model extrusion centerline first overlaps it (0.001mm geometric tolerance). Tiny geometric births without emitted paths do not become failed printed starts.','At each above-bed first-emission component, intersect its geometry and model bead footprint with native support/interface path footprints from the previous 0.5mm of Z. Bead footprints use commanded nominal line width.','Native support witness means positive overlap beneath some emitted path; it does not establish adequate contact area or support for the complete island. The nominal layer-envelope gap is not a measured physical air gap.'],limitations:['Connected expanding overhangs and bridges are outside this island-start test.','Model components that separate after inheriting printed ancestry are not new starts.','Slicer bead shape, sag, cooling, adhesion and removal require a real print.','A no-witness result is an audit flag for inspection, not proof that printing must fail.'],...audit};
 report.summary={bedStarts:audit.printed_component_starts.filter(x=>x.status==='bed-start').length,supportedStartWitnesses:audit.printed_component_starts.filter(x=>x.status==='native-support-witness').length,startFlags:audit.printed_component_starts.filter(x=>x.status==='no-native-support-witness').length};
 report.auditPolygonUnionGridMm=.000001;
 report.nativeSettingsFromPlateManifest=specimen.settings;
@@ -161,7 +163,7 @@ if(report.inspectionFlags.length){
    const e=evidence.get(f.printedStartIndex);e.roles.add(s.role);e.heights.add(s.height);e.widths.add(s.width);e.segments++;
   }
  });
- for await(const line of createInterface({input:createReadStream(gcodePath),crlfDelay:Infinity}))localParser.feed(line);
+ for await(const line of createInterface({input:Readable.from([gcodeBytes]),crlfDelay:Infinity}))localParser.feed(line);
  for(const f of report.inspectionFlags){const e=evidence.get(f.printedStartIndex);f.firstModelBoundingBoxPathEvidence={roles:[...e.roles],commandedBeadHeightsMm:[...e.heights],commandedWidthsMm:[...e.widths],segments:e.segments,note:'Actual paths intersecting the start-region bounding box; nominal model-layer thickness remains separately validated.'};}
 }
 const output=path.join(folder,'native-island-audit.json');await writeFile(output,JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify({output,...report.summary,geometricBirths:audit.geometric_births,modelLayers:audit.model_layers,inspectionFlags:report.inspectionFlags},null,2));

@@ -111,3 +111,52 @@ def test_horizontal_structural_rings_stay_inside_planned_z_slabs():
     # excluded; the experiment changes structural branches, not contact normals.
     contact = build.manifold_to_trimesh(build.tube(points, radii, 24, [True, False]))
     assert contact.bounds[1, 2] > 4.9
+
+
+def test_surface_aligned_cap_keeps_gap_when_escape_route_is_inclined():
+    """A route tilted away from a flat underside must not tilt the contact cap."""
+    for slope in (0., .4):
+        normal = np.array([slope, 0., -np.sqrt(1. - slope ** 2)])
+        tree = SupportTree()
+        tree.z_base = 0.
+        root = tree.add([.6, 0., 0.], .6, NodeKind.FOOT)
+        branch = tree.add([.6, 0., 3.], .35, NodeKind.BRANCH, parent=root.id)
+        tree.add([0., 0., 4.], .18, NodeKind.TIP, parent=branch.id, contact_id=7)
+        tree.contact_normals = {7: normal}
+        params = _params().updated(circle_segments=24, compact_junctions=True)
+        model = build.mf.Manifold.cube((4., 4., 4.), center=True).translate((0., 0., 2.))
+        model = model.rotate((0., -np.degrees(np.arcsin(slope)), 0.)).translate((0., 0., 4.06))
+        if slope == 0.:
+            legacy = build.mesh_tree_manifold(tree, params)
+            assert (legacy ^ model).volume() > 1e-5
+        params = params.updated(surface_aligned_tips=True)
+        for tubes in (False, True):
+            solid = build.mf.Manifold.batch_boolean(build.tree_solids(tree, params, tubes=tubes), build.mf.OpType.Add)
+            solid = solid.trim_by_plane((0., 0., 1.), 0.)
+            mesh = build.manifold_to_trimesh(solid)
+            assert mesh.is_watertight and len(solid.decompose()) == 1
+            assert abs((solid ^ model).volume()) < 1e-8
+            # All tip end-ring vertices lie exactly .06mm vertically beneath
+            # the underside plane; no rim consumes the requested centre gap.
+            axis = -normal
+            end_plane = np.abs((mesh.vertices - [0., 0., 4.]) @ axis) < 1e-5
+            cap = mesh.vertices[end_plane]
+            assert len(cap) >= 24
+            surface_z = 4.06 + slope / -normal[2] * cap[:, 0]
+            assert np.allclose(surface_z - cap[:, 2], .06, atol=1e-5)
+
+
+def test_surface_cap_requires_valid_original_normal_metadata():
+    params = _params().updated(compact_junctions=True, surface_aligned_tips=True)
+    for normals in ({}, {7: [0., 0., 1.]}):
+        tree = SupportTree()
+        tree.z_base = 0.
+        root = tree.add([0., 0., 0.], .6, NodeKind.FOOT)
+        tree.add([0., 0., 4.], .18, NodeKind.TIP, parent=root.id, contact_id=7)
+        tree.contact_normals = normals
+        try:
+            build.mesh_tree_manifold(tree, params)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Missing or upward-facing source contact normal was accepted")

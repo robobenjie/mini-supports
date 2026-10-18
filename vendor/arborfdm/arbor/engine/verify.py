@@ -7,6 +7,7 @@ failed, as Issue objects (severity error / warning / info, machine readable code
 Checks (code -> meaning):
   unrouted_contact     a contact could not be connected to the plate or the model (error)
   sub_layer_gap        contact less than one layer above a surface, nothing to build (warning)
+  short_contact_fit_failed  finite-width cavity fitting failed; original short pillar retained
   unsupported_region   an island / overhang region from the layer analysis has no routed
                        contact close enough below it (error for islands and large areas,
                        warning for small overhang slivers)
@@ -1029,6 +1030,14 @@ def verify(mesh: trimesh.Trimesh, analysis: AnalysisResult, contacts: list[Conta
     issues: list[Issue] = []
     progress.update(0.0, "Checking contacts")
     routed = _check_unrouted(contacts, tree, issues)
+    for fit in getattr(tree, "short_contact_fits", []):
+        if fit.get("status") == "unfitted":
+            issues.append(Issue(
+                "warning", "short_contact_fit_failed",
+                "Could not fit a printable short contact with the requested clearance; "
+                "the original pillar remains and requires local inspection. " + str(fit.get("reason", "")),
+                position=np.asarray(fit["requestedContact"], float),
+                contact_id=fit["contactId"]))
     progress.update(0.15, "Checking coverage")
     _check_regions(analysis, contacts, routed, params, issues)
     progress.update(0.4, "Checking trees")

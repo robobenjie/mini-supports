@@ -150,7 +150,8 @@ def joint_radius_factors(params: SupportParams) -> tuple[float, float]:
 
 
 def tube(points: np.ndarray, radii: np.ndarray, segs: int,
-         horizontal: Optional[list[bool]] = None) -> Optional[mf.Manifold]:
+         horizontal: Optional[list[bool]] = None,
+         ring_normals: Optional[list[Optional[np.ndarray]]] = None) -> Optional[mf.Manifold]:
     """One closed tube through points (bottom to top) with linearly varying radius.
 
     Rings are perpendicular to the bisector of the adjacent segments and use a parallel
@@ -175,6 +176,14 @@ def tube(points: np.ndarray, radii: np.ndarray, segs: int,
         # Experimental structural sections follow the router's horizontal slabs.
         # Tip end rings can retain their contact-oriented cap plane.
         dirs[np.asarray(horizontal, dtype=bool)] = (0., 0., 1.)
+    if ring_normals is not None:
+        for i, direction in enumerate(ring_normals):
+            if direction is not None:
+                d = np.asarray(direction, dtype=float)
+                length = float(np.linalg.norm(d))
+                if length < 1e-9:
+                    raise ValueError("A contact cap needs a nonzero normal")
+                dirs[i] = d / length
     ang = np.arange(segs) * (2 * math.pi / segs)
     ca, sa = np.cos(ang), np.sin(ang)
     F0 = _frame(dirs[0])
@@ -210,6 +219,233 @@ def tube(points: np.ndarray, radii: np.ndarray, segs: int,
     if m.volume() < 0:
         return None
     return m
+
+
+def fit_short_contact(mesh: trimesh.Trimesh, pos, normal, tip_radius: float,
+                      floor_z: float, params: SupportParams,
+                      model_manifold=None) -> dict:
+    """Prefer wider cavity contacts, retaining the collision-checked one-line fallback.
+
+    The preference sizes the root and projected cap; it does not guarantee that an
+    inclined loft's horizontal layers survive a particular slicer. Both attempts use
+    identical gap, intersection, foundation, angle and layer-height requirements.
+    """
+    preferred = max(float(params.line_width), float(params.short_contact_preferred_width))
+    if model_manifold is None:
+        model_manifold = trimesh_to_manifold(mesh)
+    first = _fit_short_contact_with_width(mesh, pos, normal, tip_radius, floor_z, params,
+                                          model_manifold, preferred)
+    first["preferredWidth"] = preferred
+    first["preferredWidthMet"] = first["status"] == "fitted"
+    if first["status"] == "fitted" or preferred <= params.line_width + 1e-9:
+        return first
+    fallback = _fit_short_contact_with_width(mesh, pos, normal, tip_radius, floor_z, params,
+                                             model_manifold, params.line_width)
+    fallback["preferredWidth"] = preferred
+    fallback["preferredWidthMet"] = False
+    fallback["preferredWidthFallbackReason"] = first["reason"]
+    fallback["preferredCandidatesTested"] = first["candidatesTested"]
+    fallback["candidatesTested"] += first["candidatesTested"]
+    return fallback
+
+
+def _fit_short_contact_with_width(mesh: trimesh.Trimesh, pos, normal, tip_radius: float,
+                      floor_z: float, params: SupportParams,
+                      model_manifold=None, minimum_width=None) -> dict:
+    """Fit a short model-to-model support while retaining the requested contact point.
+
+    Experimental and deliberately bounded: try smaller printable caps, small tangent
+    offsets (the requested XY point stays inside the cap), and nearby landings. The
+    exact original triangle planes set cap clearance and landing height; a Boolean
+    against the original solid rejects body intersections. Nothing is subtracted from
+    the support to force a fit. A failed search is explicit, for callers to warn about.
+    Coordinates and clearances are geometry, not predictions of deposited bead shape.
+    """
+    from shapely.geometry import Polygon, Point
+
+    P = params
+    minimum_width = max(P.line_width, float(minimum_width or P.line_width))
+    if not (getattr(P, "compact_junctions", False) and
+            getattr(P, "surface_aligned_tips", False)):
+        raise ValueError("Short-contact fitting requires compact junctions and surface-aligned tips")
+    if P.tip_penetration != 0 or P.tip_shape != "cone":
+        raise ValueError("Short-contact fitting requires cone tips with zero penetration")
+    pos = np.asarray(pos, dtype=float)
+    normal = np.array(normal, dtype=float, copy=True)
+    normal /= np.linalg.norm(normal)
+    cap_normal = -normal
+    record = {"status": "unfitted", "requestedContact": pos.tolist(),
+              "requestedGap": float(P.z_gap), "requestedTipRadius": float(tip_radius),
+              "candidatesTested": 0, "fitWidthConstraint": minimum_width}
+    if cap_normal[2] <= 1e-6:
+        return dict(record, reason="The contact normal does not face downward")
+    segs = max(8, int(P.circle_segments))
+    facet = math.cos(math.pi / segs)
+    min_radius = math.ceil(minimum_width / (2 * cap_normal[2] * facet) * 1.01 / .005) * .005
+    if min_radius > tip_radius + 1e-9:
+        return dict(record, reason="The requested cap projects to less than the required fit width")
+    if model_manifold is None:
+        model_manifold = trimesh_to_manifold(mesh)
+    if model_manifold.status() != mf.Error.NoError:
+        return dict(record, reason="Exact short-contact fitting requires a closed model solid")
+
+    # This neighbourhood contains every tested loft. Localizing the Boolean saves
+    # work on large original meshes without changing its intersection with a loft.
+    step = min(.05, minimum_width / 4)
+    span = max(.35, 2 * tip_radius)
+    zspan = max(1., float(pos[2] - floor_z) + .6)
+    largest_root = max(P.on_model_tip_diameter / 2, minimum_width / (2 * facet) * 1.01, tip_radius)
+    reach = span + largest_root + .15
+    region = model_manifold ^ mf.Manifold.cube((2 * reach, 2 * reach, 2 * zspan)).translate(
+        tuple(pos - [reach, reach, zspan]))
+    all_tri = np.asarray(mesh.vertices, float)[np.asarray(mesh.faces, np.int64)]
+    all_lo, all_hi = all_tri.min(axis=1), all_tri.max(axis=1)
+    near = ((all_hi[:, 0] >= pos[0] - reach) & (all_lo[:, 0] <= pos[0] + reach) &
+            (all_hi[:, 1] >= pos[1] - reach) & (all_lo[:, 1] <= pos[1] + reach) &
+            (all_hi[:, 2] >= pos[2] - zspan) & (all_lo[:, 2] <= pos[2] + zspan))
+    tri = all_tri[near]
+    lo, hi = tri.min(axis=1), tri.max(axis=1)
+    cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    planes = []
+    for i, t in enumerate(tri):
+        if abs(cross[i, 2]) < 1e-12:
+            planes.append(None)
+        else:
+            planes.append((-cross[i, 0] / cross[i, 2], -cross[i, 1] / cross[i, 2],
+                           float(np.dot(cross[i], t[0]) / cross[i, 2])))
+    polygons = [Polygon(t[:, :2]) if planes[i] is not None else None for i, t in enumerate(tri)]
+
+    def surface_extreme(footprint, up, reference, ceiling=None, cap_plane=None):
+        """Exact extrema of triangle/footprint intersections, including interior edges."""
+        x0, y0, x1, y1 = footprint.bounds
+        ids = np.where((hi[:, 0] >= x0) & (lo[:, 0] <= x1) &
+                       (hi[:, 1] >= y0) & (lo[:, 1] <= y1) &
+                       (hi[:, 2] >= reference - .5) & (lo[:, 2] <= reference + .5) &
+                       ((cross[:, 2] > 1e-12) if up else (cross[:, 2] < -1e-12)))[0]
+        values = []
+        for i in ids:
+            intersection = footprint.intersection(polygons[i])
+            if intersection.is_empty:
+                continue
+            geoms = list(intersection.geoms) if hasattr(intersection, "geoms") else [intersection]
+            for g in geoms:
+                if g.geom_type == "Polygon":
+                    coordinates = np.asarray(g.exterior.coords)
+                elif hasattr(g, "coords"):
+                    coordinates = np.asarray(g.coords)
+                else:
+                    continue
+                xy = coordinates[:, :2]
+                a, b, c = planes[i]
+                zz = a * xy[:, 0] + b * xy[:, 1] + c
+                if ceiling is not None:
+                    zz = zz[zz < ceiling - 1e-6]
+                if not len(zz):
+                    continue
+                if cap_plane is not None:
+                    # No ceiling filtering in this branch: coordinates stay aligned.
+                    aa, bb, cc = cap_plane
+                    zz = zz - (aa * xy[:, 0] + bb * xy[:, 1] + cc)
+                values.extend(zz.tolist())
+        return (max(values) if up else min(values)) if values else None
+
+    angles = np.arange(segs) * (2 * math.pi / segs)
+    # Match tube's parallel-transported frame exactly, starting at its horizontal root.
+    root_u = _frame(np.array([0., 0., 1.]))[:, 0]
+    cap_u = root_u - np.dot(root_u, cap_normal) * cap_normal
+    cap_u /= np.linalg.norm(cap_u)
+    cap_v = np.cross(cap_normal, cap_u)
+    cap_unit = np.outer(np.cos(angles), cap_u) + np.outer(np.sin(angles), cap_v)
+    root_unit = np.column_stack([np.sin(angles), -np.cos(angles)])
+    bound = int(math.ceil(span / step))
+    offsets = [(i * step, j * step) for i in range(-bound, bound + 1)
+               for j in range(-bound, bound + 1) if math.hypot(i * step, j * step) <= span + 1e-9]
+    offsets.sort(key=lambda d: (d[0] ** 2 + d[1] ** 2, d[0], d[1]))
+    root_min = max(P.on_model_tip_diameter / 2, minimum_width / (2 * facet) * 1.01)
+    root_radii = [float(root_min), float(minimum_width / (2 * facet) * 1.01)]
+    root_radii = list(dict.fromkeys(root_radii + [float(max(root_min, tip_radius))]))
+    floors = {}
+    max_slope = math.tan(math.radians(min(printable_angle_deg(P), P.branch_angle_deg)))
+    radii = sorted(set([float(tip_radius), float(max(min_radius, .85 * tip_radius)),
+                        float(min_radius)]), reverse=True)
+    source_point = Point(float(pos[0]), float(pos[1]))
+    cap_options = []
+    for radius in radii:
+        cap_offsets = [(0., 0.)]
+        for distance in (min(.05, min_radius * .4), min_radius * .7, radius * .85):
+            for angle in np.arange(8) * math.pi / 4:
+                dx, dy = distance * math.cos(angle), distance * math.sin(angle)
+                dz = -(cap_normal[0] * dx + cap_normal[1] * dy) / cap_normal[2]
+                shift = np.array([dx, dy, dz])
+                # The last ring is measured in the tangent plane, keeping the
+                # requested point away from the cap boundary by at least 15%.
+                if distance == radius * .85:
+                    shift *= distance / np.linalg.norm(shift)
+                if np.linalg.norm(shift) <= radius * .86:
+                    cap_offsets.append((float(shift[0]), float(shift[1])))
+        for dx, dy in cap_offsets:
+            shift = np.array([dx, dy, -(cap_normal[0] * dx + cap_normal[1] * dy) / cap_normal[2]])
+            tip = pos - [0., 0., P.z_gap] + shift
+            vertices = tip + radius * cap_unit
+            footprint = Polygon(vertices[:, :2])
+            if not footprint.covers(source_point):
+                continue
+            a, b = -cap_normal[0] / cap_normal[2], -cap_normal[1] / cap_normal[2]
+            plane = (a, b, tip[2] - a * tip[0] - b * tip[1])
+            gap = surface_extreme(footprint, False, pos[2], cap_plane=plane)
+            if gap is None:
+                continue
+            lowered = max(0., P.z_gap - gap) + 1e-5
+            tip = tip - [0., 0., lowered]
+            vertices = vertices - [0., 0., lowered]
+            cap_options.append((lowered, radius, shift, tip, vertices, gap + lowered))
+    # Prefer a cap close to its original requested point's Z gap; shrinking a
+    # footprint is preferable to moving its entire plane far from that contact.
+    cap_options.sort(key=lambda x: (round(x[0], 5), -x[1], float(np.linalg.norm(x[2]))))
+    for lowered, radius, shift, tip, vertices, guaranteed_gap in cap_options:
+        for root_radius in root_radii:
+          for oi, (rx, ry) in enumerate(offsets):
+            xy = pos[:2] + [rx, ry]
+            key = (root_radius, oi)
+            if key not in floors:
+                poly = Polygon(xy + root_radius * root_unit)
+                floors[key] = surface_extreme(poly, True, floor_z, ceiling=pos[2] - P.z_gap)
+            root_z = floors[key]
+            if root_z is None or min(vertices[:, 2]) - root_z < P.layer_height - 1e-9:
+                continue
+            # A long steep source triangle can cross the local query box while
+            # its actual landing at this XY lies below it. Never certify a loft
+            # using a Boolean that omitted part of that loft.
+            candidate_lo = np.minimum(vertices.min(axis=0), [xy[0] - root_radius, xy[1] - root_radius, root_z])
+            candidate_hi = np.maximum(vertices.max(axis=0), [xy[0] + root_radius, xy[1] + root_radius, root_z])
+            region_lo = pos - [reach, reach, zspan]
+            region_hi = pos + [reach, reach, zspan]
+            if np.any(candidate_lo < region_lo) or np.any(candidate_hi > region_hi):
+                continue
+            # The root disk is inscribed by this circle. Every cap vertex inside its
+            # expanding cone is a conservative <=phi envelope from that foundation.
+            slopes = ((np.linalg.norm(vertices[:, :2] - xy, axis=1) - root_radius * facet) /
+                      (vertices[:, 2] - root_z))
+            if max(slopes) > max_slope + 1e-9:
+                continue
+            root = np.array([xy[0], xy[1], root_z])
+            solid = tube(np.array([root, tip]), np.array([root_radius, radius]), segs,
+                         [True, False], [None, cap_normal])
+            if solid is None:
+                continue
+            record["candidatesTested"] += 1
+            volume = abs(float((solid ^ region).volume()))
+            if volume > 1e-7:
+                continue
+            return dict(record, status="fitted", tipPosition=tip.tolist(), tipRadius=radius,
+                        rootPosition=root.tolist(), rootRadius=root_radius,
+                        minimumCapGap=float(guaranteed_gap), projectedCapWidth=float(2 * radius * cap_normal[2] * facet),
+                        overlapVolume=volume, maxSlope=float(max(0., max(slopes))),
+                        capLowered=float(lowered), requestedPointGap=float(P.z_gap + lowered),
+                        capTangentOffset=shift.tolist(),
+                        requestedPointInCap=True, minimumHeight=float(min(vertices[:, 2]) - root_z),
+                        landingGap=0., searchRadius=float(span))
+    return dict(record, reason="No collision-free, one-line-wide, one-layer-high short contact fits the bounded neighbourhood at the requested top gap")
 
 
 def _chains(tree: SupportTree, ch: dict, max_bend_deg: float = 25.0):
@@ -268,6 +504,9 @@ def tree_solids(tree: SupportTree, params: SupportParams, progress: Optional[Pro
     foot_radius = getattr(tree, "foot_radius", {})
     z_base = getattr(tree, "z_base", support_base_z(P))
     ball = P.tip_shape == "ball"
+    surface_caps = getattr(P, "surface_aligned_tips", False)
+    if surface_caps and ball:
+        raise ValueError("Surface-aligned contact caps require cone tips")
     root_floors: dict[int, Optional[float]] = {}
     root_limits: dict[int, Optional[tuple[mf.Manifold, float]]] = {}
 
@@ -341,6 +580,23 @@ def tree_solids(tree: SupportTree, params: SupportParams, progress: Optional[Pro
         r_low = n.radius if par.kind == NodeKind.FOOT else par.radius
         return r_low, r_top
 
+    def cap_normals(node_ids):
+        if not surface_caps:
+            return None
+        normals = []
+        for node_id in node_ids:
+            node = nodes[node_id]
+            normal = None
+            if node.kind == NodeKind.TIP:
+                source = getattr(tree, "contact_normals", {}).get(node.contact_id)
+                if source is None:
+                    raise ValueError(f"Contact {node.contact_id} has no surface normal for its cap")
+                normal = -np.asarray(source, dtype=float)
+                if not np.all(np.isfinite(normal)) or normal[2] <= 1e-6:
+                    raise ValueError(f"Contact {node.contact_id} cap does not face upward")
+            normals.append(normal)
+        return normals
+
     def joint(n, R: float):
         """Sphere of radius R at node n whose underside is buried in the branch below."""
         if getattr(P, "compact_junctions", False) and n.kind in (NodeKind.BRANCH, NodeKind.TRUNK) and n.parent is not None:
@@ -389,7 +645,8 @@ def tree_solids(tree: SupportTree, params: SupportParams, progress: Optional[Pro
                     rad[0] = rl
             compact = getattr(P, "compact_junctions", False)
             horizontal = [nodes[i].kind != NodeKind.TIP for i in chain] if compact else None
-            m = tube(pts, rad, segs, horizontal) if len(chain) > 2 or compact else None
+            normals = cap_normals(chain)
+            m = tube(pts, rad, segs, horizontal, normals) if len(chain) > 2 or compact or surface_caps else None
             if m is not None:
                 out.append(at_root_plane(m, chain[-1]))
             else:
@@ -397,7 +654,10 @@ def tree_solids(tree: SupportTree, params: SupportParams, progress: Optional[Pro
                     rl, rt = seg_radii(chain[k])
                     lower = rl if k == 1 else rad[k - 1]
                     s_ = tube(pts[k - 1:k + 1], np.array([lower, rt]), segs,
-                              horizontal[k - 1:k + 1]) if compact else cone_between(pts[k - 1], pts[k], lower, rt, segs)
+                              horizontal[k - 1:k + 1] if horizontal else None,
+                              normals[k - 1:k + 1] if normals else None) if compact or surface_caps else cone_between(pts[k - 1], pts[k], lower, rt, segs)
+                    if s_ is None and (compact or surface_caps):
+                        raise RuntimeError(f"Invalid experimental support loft on edge {chain[k - 1]} -> {chain[k]}")
                     if s_ is not None:
                         out.append(at_root_plane(s_, chain[k]))
             top = nodes[chain[-1]]
@@ -412,8 +672,12 @@ def tree_solids(tree: SupportTree, params: SupportParams, progress: Optional[Pro
             if n.parent is None:
                 continue
             rl, rt = seg_radii(n.id)
+            compact = getattr(P, "compact_junctions", False)
             s_ = tube(np.array([nodes[n.parent].position, n.position]), np.array([rl, rt]), segs,
-                      [True, n.kind != NodeKind.TIP]) if getattr(P, "compact_junctions", False) else cone_between(nodes[n.parent].position, n.position, rl, rt, segs)
+                      [True, n.kind != NodeKind.TIP] if compact else None,
+                      cap_normals([n.parent, n.id])) if compact or surface_caps else cone_between(nodes[n.parent].position, n.position, rl, rt, segs)
+            if s_ is None and (compact or surface_caps):
+                raise RuntimeError(f"Invalid experimental support loft on edge {n.parent} -> {n.id}")
             if s_ is not None:
                 out.append(at_root_plane(s_, n.id))
             if len(ch[n.id]) == 1 and n.kind in (NodeKind.BRANCH, NodeKind.TRUNK):

@@ -69,6 +69,9 @@ class SupportParams:
     merge_distance: float = 6.0           # max horizontal distance for two branches to merge
     junction_radius_factor: float = 1.15  # junction sphere radius / branch radius
     compact_junctions: bool = False      # experimental hull of incident branch rings
+    surface_aligned_tips: bool = False   # experimental cap plane follows the model underside
+    fit_short_contacts: bool = False    # experimental finite-width cavity contact fitting
+    short_contact_preferred_width: float = 0.0  # optional wider root/projected cap; fall back to line_width
     trunk_diameter: float = 2.6
     trunk_growth_per_mm: float = 0.02     # diameter growth per mm descended
     min_tree_distance: float = 1.5
@@ -166,7 +169,8 @@ class SupportParams:
                 p.append(f"{name} must be > 0")
         non_negative = ("merge_distance", "min_region_area", "tip_penetration", "z_gap", "xy_clearance", "model_neck_clearance",
                         "trunk_growth_per_mm", "min_tree_distance", "foot_height", "collar_height",
-                        "brace_min_height", "raft_margin", "raft_lift", "raft_release_gap")
+                        "brace_min_height", "raft_margin", "raft_lift", "raft_release_gap",
+                        "short_contact_preferred_width")
         for name in non_negative:
             if getattr(self, name) < 0:
                 p.append(f"{name} must be >= 0")

@@ -142,7 +142,8 @@ created by these local scripts.
 - `python/browser_engine.py`: input limits, profile selection, upstream generation,
   upstream 3MF export and read-back validation, preview meshes, check reports,
   and packaging of cached mini assemblies without regenerating their meshes.
-- `vendor/arborfdm/`: unmodified upstream Python source, profiles, and tests.
+- `vendor/arborfdm/`: upstream Python source, profiles, and tests, with the local
+  experimental support changes documented in [research/README.md](research/README.md).
 - `scripts/setup-runtime.mjs`: pinned runtime downloads and engine archive.
 - `scripts/test-engine.mjs`: executes the actual WASM path under Node, exercises
   transforms/booleans/slicing, generates supports, and validates 3MF parts.

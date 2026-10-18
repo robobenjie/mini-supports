@@ -129,6 +129,81 @@ def test_landing_neck_checks_model_above_local_contact(lip_x, clearance, expecte
     assert router._land_path_clear(node.id, np.array([0., 0.]), 4., 1.) is expected_clear
 
 
+def test_failed_tip_route_retries_another_axis_without_dropping_contact(monkeypatch):
+    """A free tip centre in a narrow slot can still trap its first full branch."""
+    p = params.SupportParams(layer_height=0.06, z_gap=0.06, tip_penetration=0,
+                             raft_enabled=False, allow_on_model=True,
+                             on_model_tip_diameter=0.24, line_width=0.22,
+                             tip_length=1.2, model_neck_clearance=0.01,
+                             compact_junctions=True, branch_angle_deg=40,
+                             branch_min_diameter=1.2, braces_enabled=False)
+    mesh = S._to_trimesh(S._union([
+        S._box((-4, -5, 0), (4, 5, 0.4)),
+        S._box((0.25, -5, 0.4), (0.5, 5, 9.4)),
+        S._box((1.05, -5, 0.4), (1.4, 5, 9.4)),
+        S._box((-0.5, -0.5, 10), (0.5, 0.5, 10.5)),
+    ]))
+    contact = Contact(0, np.array([0., 0., 10.]), np.array([0., 0., -1.]), ContactReason.MANUAL)
+    trapped = np.array([np.sin(np.radians(40)), 0., -np.cos(np.radians(40))])
+    monkeypatch.setattr(T._Router, "_tip_dir", lambda self, pos, normal: trapped.copy())
+    retry = T._Router._retry_failed_tips
+    monkeypatch.setattr(T._Router, "_retry_failed_tips", lambda self: None)
+    before = T.build_tree(mesh, [contact], p, Progress())
+    assert 0 in before.failed
+    monkeypatch.setattr(T._Router, "_retry_failed_tips", retry)
+    after = T.build_tree(mesh, [contact], p, Progress())
+    assert 0 not in after.failed
+    assert any(n.kind == NodeKind.TIP and n.contact_id == 0 for n in after.nodes.values())
+    assert after.routing_retries[0]["accepted"]
+    np.testing.assert_allclose(after.contact_normals[0], [0, 0, -1])
+    np.testing.assert_allclose(contact.normal, [0, 0, -1])
+
+    # Add a good distant branch and inspect the isolated retry operation before
+    # subsequent widening/brace stages. Its graph and dimensions must survive.
+    two_model = S._to_trimesh(S._union([
+        build.trimesh_to_manifold(mesh), S._box((-8.5, -0.5, 10), (-7.5, 0.5, 10.5)),
+        S._box((-11, -3, 0), (-5, 3, 0.4)),
+    ]))
+    second = Contact(1, np.array([-8., 0., 10.]), np.array([0., 0., -1.]), ContactReason.MANUAL)
+    main = SupportTree()
+    T._init_tree_extras(main, 0)
+    router = T._Router(two_model, [contact, second], p, main, Progress())
+    router._prepare()
+    router._make_tips()
+    router._route()
+    router._cleanup()
+    assert 0 in main.failed and 1 not in main.failed
+    snapshot = {key: (n.position.copy(), n.radius, n.parent, n.kind, n.contact_id)
+                for key, n in main.nodes.items()}
+    assert snapshot
+    router._retry_failed_tips()
+    assert 0 not in main.failed
+    for key, (position, radius, parent, kind, contact_id) in snapshot.items():
+        node = main.nodes[key]
+        np.testing.assert_array_equal(node.position, position)
+        assert (node.radius, node.parent, node.kind, node.contact_id) == (radius, parent, kind, contact_id)
+
+
+@pytest.mark.parametrize("lip_x, expected_clear", [(-0.13, True), (0.0, False)])
+def test_compact_landing_checks_intersection_of_root_and_inclined_tube(lip_x, expected_clear):
+    """A nearby lip outside the inclined tube must not block its vertical envelope."""
+    p = params.SupportParams(layer_height=0.06, z_gap=0.06, tip_penetration=0,
+                             raft_enabled=False, allow_on_model=True,
+                             on_model_tip_diameter=0.24, line_width=0.22,
+                             tip_length=1.2, model_neck_clearance=0.01,
+                             compact_junctions=True, branch_angle_deg=40)
+    floor = S._box((-3, -3, 0), (3, 3, 1))
+    lip = S._box((lip_x, -0.15, 1.65), (lip_x + 0.03, 0.15, 1.70))
+    mesh = S._to_trimesh(S._union([floor, lip]))
+    c = Contact(0, np.array([0., 0., 6.]), np.array([0., 0., -1.]), ContactReason.MANUAL)
+    tree = SupportTree()
+    T._init_tree_extras(tree, 0)
+    router = T._Router(mesh, [c], p, tree, Progress())
+    router._prepare()
+    node = tree.add([0.35, 0., 2.2], 0.35, NodeKind.BRANCH)
+    assert router._land_path_clear(node.id, np.array([0., 0.]), 2.2, 1.) is expected_clear
+
+
 @pytest.mark.parametrize("angle", [0.0, 15.0])
 def test_landing_uses_exact_surface_at_candidate_xy(angle):
     import trimesh
