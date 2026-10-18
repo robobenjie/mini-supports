@@ -30,6 +30,7 @@ def run(settings_json):
         raise ValueError('Browser mode supports models up to 250 mm. Reduce the scale and try again.')
     params = replace(PROFILES[settings['profile']].params)
     params.raft_enabled = settings['raft']
+    params.raft_split = bool(settings.get('raftSplit', False))
     params.overhang_angle_deg = float(settings['overhang'])
     params.z_gap = float(settings['gap'])
     result = generate(model, params, progress=Progress(lambda f, text: report(f * 0.94, text)))
@@ -56,6 +57,7 @@ def run(settings_json):
         'triangles': exported.n_triangles,
         'supportWatertight': bool(result.support_mesh.is_watertight) if len(result.support_mesh.faces) else True,
         'parts': exported.objects,
+        'raftSplit': getattr(result.tree, 'raft_split_report', None),
     }
     report(1, 'Ready to slice')
     del result, model

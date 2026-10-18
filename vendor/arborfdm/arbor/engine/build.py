@@ -888,6 +888,9 @@ def raft_polygon(tree: SupportTree, params: SupportParams):
     from shapely.ops import unary_union
 
     P = params
+    split = getattr(tree, "_raft_split_polygon", None)
+    if P.raft_split and split is not None:
+        return split
     if model_on_raft(P):
         xy, rad = _feet_disks(tree, P)
         disks = [Point(xy[i]).buffer(rad[i], 16) for i in range(len(xy))]

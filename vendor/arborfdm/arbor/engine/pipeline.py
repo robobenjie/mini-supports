@@ -177,12 +177,22 @@ def _generate(mesh, params, manual_contacts, progress, analysis, contacts) -> Ge
     t = time.perf_counter()
     support_mesh = _build.mesh_tree(tree, params, progress.sub(0.7, 0.92))
     raft_mesh = _build.mesh_raft(tree, params) if params.raft_enabled else None
+    if params.raft_split:
+        from .raft_split import finalize_split
+        if not finalize_split(tree, params, support_mesh, raft_mesh):
+            tree.braces = list(getattr(tree, "_raft_split_original_braces", tree.braces))
+            support_mesh = _build.mesh_tree(tree, params, progress.sub(0.7, 0.92))
+            raft_mesh = _build.mesh_raft(tree, params) if params.raft_enabled else None
     timings["mesh"] = time.perf_counter() - t
 
     t = time.perf_counter()
     issues: list[Issue] = _verify.verify(mesh, analysis, contacts, tree, support_mesh,
                                          params, progress.sub(0.92, 1.0))
     stats = _verify.support_stats(mesh, contacts, tree, support_mesh, raft_mesh, issues, params)
+    if params.raft_split:
+        split = getattr(tree, "raft_split_report", {})
+        stats["raft_split_applied"] = int(split.get("status") == "applied")
+        stats["raft_split_gap_mm"] = float(split.get("gap", 0.0))
     timings["verify"] = time.perf_counter() - t
     progress.update(1.0, "Done")
     return GenerationResult(contacts, tree, support_mesh, raft_mesh, issues, analysis, timings, stats)

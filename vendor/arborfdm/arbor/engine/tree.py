@@ -476,6 +476,9 @@ def build_tree(mesh: trimesh.Trimesh, contacts: list[Contact], params: SupportPa
     if contacts:
         router = _Router(mesh, contacts, params, tree, progress)
         router.run()
+    elif params.raft_split:
+        from .raft_split import plan_split
+        plan_split(tree, params, mesh)
     if z_base < z_route:
         for n in tree.nodes.values():
             if n.kind == NodeKind.FOOT and n.position[2] <= z_route + 1e-9:
@@ -512,6 +515,23 @@ class _Router:
         self._retry_failed_tips()
         self._limit_widening()
         self._stabilize_feet()
+        if P.raft_split:
+            from .raft_split import plan_split
+            if P.raft_enabled and not model_on_raft(P):
+                self._raft_keepout()
+            # Preserve the unrestricted brace layout for an exact geometry fallback
+            # if the final union reveals incidental links across the proposed slot.
+            if P.braces_enabled:
+                self._braces()
+            tree = self.tree
+            tree._raft_split_original_braces = list(tree.braces)
+            plan_split(tree, P, self.mesh)
+            if getattr(tree, "raft_split_root_sides", {}):
+                tree.braces = []
+                if P.braces_enabled:
+                    self._braces()
+            prog.update(1.0, "Tree done")
+            return
         if P.braces_enabled:
             self._braces()
         if P.raft_enabled and not model_on_raft(P):
@@ -1447,6 +1467,7 @@ class _Router:
 
     # -- braces -----------------------------------------------------------------------
     def _braces(self) -> None:
+        from .raft_split import same_half
         P, tree, zb = self.P, self.tree, self.zb
         ch = tree.children()
         trunks = []
@@ -1476,6 +1497,8 @@ class _Router:
                     if dist <= P.brace_max_length * 1.5:
                         pairs.add((min(a, int(b)), max(a, int(b))))
             for a, b in sorted(pairs):
+                if not same_half(tree, trunks[a][2], trunks[b][2]):
+                    continue
                 if self._brace_pair(trunks[a][:2], trunks[b][:2], P.brace_max_length):
                     links.append((trunks[a][2], trunks[b][2]))
         self._bridge_isolated(ch, links)
@@ -1571,6 +1594,7 @@ class _Router:
         stable (braced_group_stable) to its nearest neighbouring trunk, until it is stable
         or no link can be built (verify then reports isolated_tall_tree). Nothing changes
         when no tall tree is in such a group."""
+        from .raft_split import same_half
         P, tree, zb = self.P, self.tree, self.zb
         nodes = tree.nodes
         feet = [f.id for f in tree.roots() if f.kind == NodeKind.FOOT]
@@ -1653,6 +1677,8 @@ class _Router:
                     continue
                 for b in spine:
                     if b in ms:
+                        continue
+                    if not same_half(tree, a, b):
                         continue
                     g = gap(a, b)
                     if g <= max_run:

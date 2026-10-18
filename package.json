@@ -9,10 +9,11 @@
     "setup:runtime": "node scripts/setup-runtime.mjs",
     "build": "npm run setup:runtime && tsc --noEmit && vite build && node scripts/package-source.mjs",
     "preview": "vite preview --host 127.0.0.1",
-    "test": "npm run test:import && node --experimental-strip-types scripts/test-engine.mjs && npm run test:plate && npm run test:drag",
+    "test": "npm run test:import && node --experimental-strip-types scripts/test-engine.mjs && npm run test:plate && npm run test:drag && npm run test:raft-split",
     "test:import": "node --experimental-strip-types scripts/test-import.mjs",
     "test:plate": "node --experimental-strip-types scripts/test-plate.mjs",
-    "test:drag": "node --experimental-strip-types scripts/test-drag.mjs"
+    "test:drag": "node --experimental-strip-types scripts/test-drag.mjs",
+    "test:raft-split": "node scripts/test-raft-split.mjs"
   },
   "dependencies": {
     "@fontsource-variable/dm-sans": "5.3.0",

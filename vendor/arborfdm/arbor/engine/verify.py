@@ -209,11 +209,20 @@ def _check_tree(tree: SupportTree, params, issues):
         if braced:
             continue
         if params.raft_enabled:
-            # the foot is part of one raft plate (build.raft_polygon joins the pieces): the
-            # anchoring is the raft, not the foot disc alone
+            # A removal split must not borrow anchoring from the opposite half.
+            split = getattr(tree, "raft_split_report", {})
+            if split.get("status") in ("planned", "applied"):
+                side = getattr(tree, "raft_split_root_sides", {}).get(r)
+                half = next((part for part in split.get("halves", []) if part["side"] == side), None)
+                if half is None or half["anchor_width_mm"] * 5 < h:
+                    issues.append(Issue("warning", "unstable_split_raft",
+                                        f"Tree of height {h:.1f} mm has insufficient anchoring on its raft half",
+                                        rn.position.copy()))
+                    continue
             issues.append(Issue("info", "tall_tree_on_raft",
-                                f"Tree of height {h:.1f} mm stands on a {2 * fr:.1f} mm foot, "
-                                "anchored by the raft", rn.position.copy()))
+                                f"Tree of height {h:.1f} mm stands on a {2 * fr:.1f} mm foot, " +
+                                ("anchored by its raft section" if split.get("status") in ("planned", "applied")
+                                 else "anchored by the raft"), rn.position.copy()))
             continue
         hints = [x for x, on in (("braces", not params.braces_enabled),
                                  ("a raft", not params.raft_enabled), ("a larger foot", True)) if on]
@@ -1028,6 +1037,13 @@ def verify(mesh: trimesh.Trimesh, analysis: AnalysisResult, contacts: list[Conta
            progress: Optional[Progress] = None) -> list[Issue]:
     progress = progress or Progress()
     issues: list[Issue] = []
+    split = getattr(tree, "raft_split_report", {}) if params.raft_split else {}
+    if split:
+        applied = split.get("status") == "applied"
+        issues.append(Issue("info" if applied or split.get("connectivity") is None else "warning",
+                            "raft_split_applied" if applied else "raft_split_skipped",
+                            (f"Raft split into two sections with a {split['gap']:.2f} mm removal seam. "
+                             if applied else "Raft kept intact. ") + split.get("reason", "")))
     progress.update(0.0, "Checking contacts")
     routed = _check_unrouted(contacts, tree, issues)
     for fit in getattr(tree, "short_contact_fits", []):

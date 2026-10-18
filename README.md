@@ -86,6 +86,19 @@ rests on the bed. Moving a completed assembly in Z moves its raft too. Trees do 
 and inspect potential overlaps after rotation; inter-mini collision avoidance is
 not part of the independent generation path.
 
+**Split enclosing rafts** looks for a useful full-depth seam when support feet
+surround a model. It subtracts a narrow strip from the existing broad pad, first
+trying straight cuts and then a bounded search for bent cuts around obstacles.
+It keeps the feet and model foundation intact, retains substantial
+raft sections, and keeps braces within each section. The final support-and-raft
+geometry is checked for connections across the split; a split that remains joined
+is discarded and the original bracing is restored. The support summary explains
+whether a split was applied or skipped. This is a removal heuristic, not an
+extraction-path guarantee: branches may still need clipping. Disable the option
+for an intact-raft comparison. The engine parameter is opt-in (`raft_split`);
+the browser enables the automatic attempt while **Add a raft** is on.
+The seam is at least 0.6 mm or two extrusion widths, whichever is larger.
+
 This is a geometry import, not a slicer project round-trip. Printer/filament/process
 settings, colors, painted supports, and modifier semantics are not retained.
 Export a single plate's printable geometry from your slicer, without modifier
@@ -96,6 +109,7 @@ npm test                 # importer + real WASM engine + 3MF round-trip tests
 npm run test:import      # placement, units, mirrors, instances, and invalid inputs
 npm run test:plate       # original mesh bytes, compact packing, append/delete, source paths
 npm run test:drag        # direct movement/rotation, support caching, snapping
+npm run test:raft-split  # removal seams, anchoring, braces, and actual solid connectivity
 npm run build            # runtime assets + typecheck + static build + source archive
 npm run preview
 ```

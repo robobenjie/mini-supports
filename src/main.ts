@@ -32,6 +32,7 @@ $('#app').innerHTML=`
 <div class="label-row"><label id="density-label">Support density</label><span id="density-hint">The sweet spot</span></div><div class="segmented" role="group" aria-labelledby="density-label"><button data-density="light" aria-pressed="false">Light</button><button data-density="normal" class="selected" aria-pressed="true">Balanced</button><button data-density="dense" aria-pressed="false">Dense</button></div>
 <div class="parallel-control"><label for="parallel-parts">Parallel parts</label><select id="parallel-parts" aria-describedby="parallel-hint"></select><p id="parallel-hint"></p></div>
 <label class="toggle-row"><span><strong>Add a raft</strong><small>A steady foundation for small parts</small></span><input id="raft" type="checkbox" checked role="switch"/><span class="switch" aria-hidden="true"></span></label>
+<label class="toggle-row"><span><strong>Split enclosing rafts</strong><small>Separate sections for easier removal</small></span><input id="raft-split" type="checkbox" checked role="switch"/><span class="switch" aria-hidden="true"></span></label>
 <details class="advanced"><summary>${icon('sliders-horizontal')} Fine-tune ${icon('chevron-down')}</summary><div class="advanced-fields"><label>Overhang angle <span class="input-unit"><input id="overhang" type="number" min="10" max="80" step="1" value="55"/>°</span></label><label>Tip Z gap <span class="input-unit"><input id="gap" type="number" min="0" max="0.4" step="0.01" value="0.03"/>mm</span></label><p>Angles are measured from vertical. A larger tip gap makes removal easier but reduces contact.</p></div></details>
 </section>
 <div class="sidebar-bottom"><span class="tiny-tree">✳</span><span>Free, open source, and growing.</span><a href="/mini-supports-source.zip" id="source-link" title="Download corresponding source (GPL-3.0-or-later)">Source ${icon('arrow-up-right')}</a></div>
@@ -154,6 +155,7 @@ function setBusy(value:boolean) {
   busy=value;viewer.setLocked(value);
   if(!value){clearInterval(elapsedTimer);if(startedAt)$('#elapsed').textContent=`Completed in ${((performance.now()-startedAt)/1000).toFixed(1)}s`;}
   document.querySelectorAll<HTMLButtonElement|HTMLInputElement|HTMLSelectElement>('.sidebar button,.sidebar input,.sidebar select,[data-import]').forEach(e=>e.disabled=value);
+  $<HTMLInputElement>('#raft-split').disabled=value||!$<HTMLInputElement>('#raft').checked;
   $('#cancel').hidden=!value;$<HTMLButtonElement>('#cancel').disabled=false;
   $('#progress-section').hidden=!value&&!startedAt;$('#generate').classList.toggle('working',value);renderState();
 }
@@ -254,7 +256,10 @@ for(const button of document.querySelectorAll<HTMLButtonElement>('[data-density]
   density=button.dataset.density!;document.querySelectorAll<HTMLButtonElement>('[data-density]').forEach(b=>{b.classList.toggle('selected',b===button);b.setAttribute('aria-pressed',String(b===button))});
   $('#density-hint').textContent=density==='light'?'Fewer contact marks':density==='dense'?'More contact points':'The sweet spot';invalidateAll();
 };
-for(const id of ['raft','overhang','gap'])$('#'+id).addEventListener('input',invalidateAll);
+for(const id of ['raft','raft-split','overhang','gap'])$('#'+id).addEventListener('input',()=>{
+  $<HTMLInputElement>('#raft-split').disabled=busy||!$<HTMLInputElement>('#raft').checked;
+  invalidateAll();
+});
 $('#mini-select').onchange=()=>viewer.select($<HTMLSelectElement>('#mini-select').value);
 $('#scale').onchange=()=>{const input=$<HTMLInputElement>('#scale');if(!input.checkValidity()||!Number.isFinite(input.valueAsNumber)){input.value=String(viewer.selected?.scale??100);return}viewer.setScale(input.valueAsNumber)};
 for(const input of document.querySelectorAll<HTMLInputElement>('[data-angle]')) {
@@ -282,7 +287,7 @@ $('#cancel').onclick=()=>{
   pendingImport?.terminate();pendingImport=undefined;setBusy(false);updateProgress(0,'Cancelled — completed minis keep their supports');
   toast('Cancelled. Completed minis keep their supports.');
 };
-function settings(name:string):Settings {return{profile:`nozzle_${nozzle}_${density}`,raft:$<HTMLInputElement>('#raft').checked,overhang:$<HTMLInputElement>('#overhang').valueAsNumber,gap:$<HTMLInputElement>('#gap').valueAsNumber,name}}
+function settings(name:string):Settings {return{profile:`nozzle_${nozzle}_${density}`,raft:$<HTMLInputElement>('#raft').checked,raftSplit:$<HTMLInputElement>('#raft-split').checked,overhang:$<HTMLInputElement>('#overhang').valueAsNumber,gap:$<HTMLInputElement>('#gap').valueAsNumber,name}}
 function failure(message:string) {
   generationRun++;queue=[];workers.forEach(w=>w.terminate());workers=[];activeJobs.clear();setBusy(false);
   const lines=message.trim().split('\n');updateProgress(0,'Generation stopped');toast(lines.at(-1)||'Generation failed.');console.error(message);

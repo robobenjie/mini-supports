@@ -94,6 +94,8 @@ class SupportParams:
     raft_enabled: bool = True
     raft_thickness: float = 0.8
     raft_margin: float = 2.0
+    raft_split: bool = False            # heuristic removal slot for surrounding support cages
+    raft_split_gap: float = 0.6         # actual slot is at least two line widths
     # raft_coverage (docs/ALGORITHM.md, "Raft"):
     #   "feet"      raft under the feet only (hulls of the foot clusters, minus the model
     #               footprint, joined by a ring); the model stands on the plate (v0.1)
@@ -163,7 +165,7 @@ class SupportParams:
         positive = ("line_width", "layer_height", "tip_diameter", "tip_length", "tip_base_diameter",
                     "branch_min_diameter", "branch_max_diameter", "segment_length",
                     "trunk_diameter", "foot_diameter", "collar_diameter", "on_model_tip_diameter",
-                    "brace_diameter", "brace_spacing_z", "brace_max_length")
+                    "brace_diameter", "brace_spacing_z", "brace_max_length", "raft_split_gap")
         for name in positive:
             if getattr(self, name) <= 0:
                 p.append(f"{name} must be > 0")

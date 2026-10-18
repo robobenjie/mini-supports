@@ -142,3 +142,34 @@ python3 scripts/research-original-geometry.py --self-test
 ```
 
 The short-contact tests rebuild the actual support mesh for flat and sloped cavities, then independently check original-solid intersection, cap gap, root contact, projected width and expansion. They reject cavities narrower than one printable layer plus the gap and caps narrower than one line. The geometry checker requires NumPy; the other tests run the actual Python/Manifold WASM path. Passing these checks qualifies a candidate for further slicing and inspection, not a claim that it prints or removes cleanly. Bracing strength, broad-underside quality, trapped material and fragile-detail survival still need the physical comparisons.
+
+## Shared-pad removal seams
+
+The removal-seam experiment keeps the original broad raft outline and subtracts a
+narrow full-depth strip. It first searches for a straight seam, then tries bounded
+doglegs around protected feet and the model base. Whole rooted supports retain
+their routes and contacts. Both bracing passes stay within each raft section;
+an actual support-plus-raft Boolean union checks that two grounded groups remain.
+Failed separation restores the intact raft and original braces. This is an
+extraction heuristic, not a proof of a collision-free removal path.
+
+`npm run test:raft-split` runs ten synthetic regressions in the actual browser
+Python/Manifold runtime. The bent fixture keeps 96.09% of the original broad pad,
+all eight feet and the full model-base foundation, with four feet on each side.
+The exact support/raft union changes from one connected solid to two. Tests also
+cover unchanged contacts, seam-only material removal, bracing restrictions,
+reproducibility, invalid settings, and intact fallback through the pipeline.
+The script exports matched intact/split geometry and a top-view SVG under the
+ignored `test-results/raft-split/` directory. These are geometry-inspection
+fixtures, not sliced or physically validated print files.
+
+The complete app test suite and static build passed. Browser generation on the
+stock figurine completed in 10.6 seconds and correctly reported that no protected
+split fit. Two full-resolution collection samples retained their intact rafts:
+the bare arm had fewer than four plate feet, and the spanner hand had no accepted
+seam. Split-enabled generation took 5.3 and 6.9 seconds respectively, with no new
+engine errors or changes to contact/tree counts. This initial heuristic is
+conservative; success on the synthetic cage does not establish coverage of all
+real cages. The existing validated print kits are unchanged. Physical follow-up
+should compare identical parts with intact versus split rafts, recording removal
+time, necessary branch cuts, retained fragments, and print stability.
