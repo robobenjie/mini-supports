@@ -68,6 +68,7 @@ class SupportParams:
     segment_length: float = 1.0
     merge_distance: float = 6.0           # max horizontal distance for two branches to merge
     junction_radius_factor: float = 1.15  # junction sphere radius / branch radius
+    compact_junctions: bool = False      # experimental hull of incident branch rings
     trunk_diameter: float = 2.6
     trunk_growth_per_mm: float = 0.02     # diameter growth per mm descended
     min_tree_distance: float = 1.5
@@ -124,6 +125,7 @@ class SupportParams:
     # --- supports standing on the model -------------------------------------
     allow_on_model: bool = True
     on_model_tip_diameter: float = 0.4
+    model_neck_clearance: float = 0.1   # model separation above the landing contact zone
 
     # --- meshing ------------------------------------------------------------
     circle_segments: int = 12
@@ -162,7 +164,7 @@ class SupportParams:
         for name in positive:
             if getattr(self, name) <= 0:
                 p.append(f"{name} must be > 0")
-        non_negative = ("merge_distance", "min_region_area", "tip_penetration", "z_gap", "xy_clearance",
+        non_negative = ("merge_distance", "min_region_area", "tip_penetration", "z_gap", "xy_clearance", "model_neck_clearance",
                         "trunk_growth_per_mm", "min_tree_distance", "foot_height", "collar_height",
                         "brace_min_height", "raft_margin", "raft_lift", "raft_release_gap")
         for name in non_negative:

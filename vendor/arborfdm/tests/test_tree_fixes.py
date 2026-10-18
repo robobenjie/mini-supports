@@ -104,6 +104,58 @@ def test_landing_path_rejects_drop_through_model():
     assert not blocked._land_path_clear(n.id, np.array([8.0, 0.0]), 14.0, 3.0)
 
 
+@pytest.mark.parametrize("lip_x, clearance, expected_clear", [
+    (None, 0.1, True), (0.08, 0.1, False), (0.08, 0.01, False),
+    (0.16, 0.1, False), (0.16, 0.01, True),
+])
+def test_landing_neck_checks_model_above_local_contact(lip_x, clearance, expected_clear):
+    """A thin stem must not enter a lip below its previously checked tip base."""
+    p = params.SupportParams(layer_height=0.06, z_gap=0.06, tip_penetration=0,
+                             raft_enabled=False, allow_on_model=True,
+                             on_model_tip_diameter=0.24, line_width=0.22, tip_length=1.2,
+                             model_neck_clearance=clearance)
+    solids = [S._box((-3, -3, 0), (3, 3, 1))]
+    if lip_x is not None:
+        # The lip crosses the narrow stem 0.15–0.65mm above the landing floor,
+        # entirely below the 1.2mm tip base checked by the former planner.
+        solids.append(S._box((lip_x, -0.5, 1.15), (lip_x + 0.1, 0.5, 1.65)))
+    mesh = S._to_trimesh(S._union(solids))
+    c = Contact(0, np.array([0., 0., 6.]), np.array([0., 0., -1.]), ContactReason.MANUAL)
+    tree = SupportTree()
+    T._init_tree_extras(tree, 0)
+    router = T._Router(mesh, [c], p, tree, Progress())
+    router._prepare()
+    node = tree.add([0., 0., 4.], 0.5, NodeKind.BRANCH)
+    assert router._land_path_clear(node.id, np.array([0., 0.]), 4., 1.) is expected_clear
+
+
+@pytest.mark.parametrize("angle", [0.0, 15.0])
+def test_landing_uses_exact_surface_at_candidate_xy(angle):
+    import trimesh
+    p = params.SupportParams(layer_height=0.06, z_gap=0.06, tip_penetration=0,
+                             raft_enabled=False, allow_on_model=True,
+                             on_model_tip_diameter=0.24, line_width=0.22,
+                             tip_length=1.2, model_neck_clearance=0.01)
+    mesh = trimesh.creation.box(extents=[6, 6, 1])
+    mesh.apply_transform(trimesh.transformations.rotation_matrix(np.radians(angle), [0, 1, 0]))
+    mesh.apply_translation([0, 0, 1])
+    c = Contact(0, np.array([0., 0., 8.]), np.array([0., 0., -1.]), ContactReason.MANUAL)
+    tree = SupportTree()
+    T._init_tree_extras(tree, 0)
+    router = T._Router(mesh, [c], p, tree, Progress())
+    router._prepare()
+    router.landed, router.fail_nodes = [], {}
+    node = tree.add([0., 0., 5.], 0.5, NodeKind.BRANCH)
+    exact_top = 1 + 0.5 / np.cos(np.radians(angle))
+    # A cell-centre sample can differ from the chosen XY on a slope. Preserve
+    # the candidate but deliberately bias its coarse height to test correction.
+    router.grid.top_below = lambda q, z: exact_top + 0.15 if np.linalg.norm(q) < 1e-9 else None
+    router._blocked(node.id, np.array([0., 0.]), 5., 0.5)
+    feet = [n for n in tree.nodes.values() if n.kind == NodeKind.MODEL_FOOT]
+    assert len(feet) == 1
+    assert feet[0].position[2] == pytest.approx(exact_top, abs=1e-7)
+
+
 def test_blocked_node_fails_instead_of_cutting_through():
     """A node boxed in above a bar with no clear landing spot is reported, not landed."""
     floor = S._box((-15, -15, 0), (15, 15, 3))
@@ -178,6 +230,30 @@ def test_short_support_on_model_respects_allow_on_model():
     for c in act:
         assert "supports on the model are disabled" in res.tree.failed[c.id]
     assert res.tree.stats()["model_feet"] == 0
+
+
+@pytest.mark.parametrize("free_height,expected", [(0.15, True), (0.11, False)])
+def test_short_support_counts_top_air_gap_once(free_height, expected):
+    """The air gap is reserved once; a remaining full layer can support the roof."""
+    p = prm().updated(layer_height=0.06, z_gap=0.06, tip_penetration=0,
+                      raft_enabled=False, allow_on_model=True)
+    floor = S._box((-3, -3, 0), (3, 3, 1))
+    roof = S._box((-2, -2, 1 + free_height), (2, 2, 2))
+    mesh = S._to_trimesh(S._union([floor, roof]))
+    contact = Contact(0, np.array([0.0, 0.0, 1 + free_height]),
+                      np.array([0.0, 0.0, -1.0]), ContactReason.MANUAL, manual=True)
+    tree = T.build_tree(mesh, [contact], p, Progress())
+    tips = [n for n in tree.nodes.values() if n.kind == NodeKind.TIP]
+    assert bool(tips) is expected
+    if expected:
+        assert not tree.failed
+        tip = tips[0]
+        foot = tree.nodes[tip.parent]
+        assert foot.kind == NodeKind.MODEL_FOOT
+        assert tip.position[2] - foot.position[2] == pytest.approx(free_height - p.z_gap)
+        assert tip.position[2] - foot.position[2] >= p.layer_height
+    else:
+        assert "less than one layer" in tree.failed[contact.id]
 
 
 def test_ray_down_is_exact():

@@ -1,0 +1,157 @@
+{
+  "startedAt": "2026-10-18T19:40:10Z",
+  "algorithmStoppedAt": "2026-10-18T19:59:52Z",
+  "timeboxMinutes": 20,
+  "decision": "Remove unmatched N5. D6 still has an unrouted surface contact; no accepted full-miniature custom candidate.",
+  "experimentalModeDefault": false,
+  "physicalPrintPerformed": false,
+  "variants": [
+    {
+      "id": "spore-D0",
+      "label": "Full-resolution challenge: explicit gap and strengthened branches",
+      "originalAnalysis": true,
+      "seconds": 12.952366292,
+      "contacts": 81,
+      "routed": 73,
+      "gate": {
+        "engineErrors": 0,
+        "engineWarnings": 14,
+        "supportClosed": true,
+        "originalCollisionMeasured": true,
+        "originalCollisionVolumeMm3": 0.09009060735885104,
+        "outsideContactCollisionVolumeMm3": 0.02429535590185215,
+        "status": "reject-branch-body-collision",
+        "physicalValidation": "not printed"
+      },
+      "sourceTrianglesPreserved": true,
+      "engineArchiveSha256": null
+    },
+    {
+      "id": "spore-D1",
+      "label": "Challenge with smaller junction envelope",
+      "originalAnalysis": true,
+      "seconds": 14.585803749999998,
+      "contacts": 81,
+      "routed": 78,
+      "gate": {
+        "engineErrors": 0,
+        "engineWarnings": 8,
+        "supportClosed": true,
+        "originalCollisionMeasured": true,
+        "originalCollisionVolumeMm3": 0.11475989478682952,
+        "outsideContactCollisionVolumeMm3": 0.032214217396427325,
+        "status": "reject-branch-body-collision",
+        "physicalValidation": "not printed"
+      },
+      "sourceTrianglesPreserved": true,
+      "engineArchiveSha256": null
+    },
+    {
+      "id": "spore-D2",
+      "label": "Challenge with narrow model-root necks and smaller junctions",
+      "originalAnalysis": true,
+      "seconds": 15.020796832999999,
+      "contacts": 81,
+      "routed": 78,
+      "gate": {
+        "engineErrors": 0,
+        "engineWarnings": 8,
+        "supportClosed": true,
+        "originalCollisionMeasured": true,
+        "originalCollisionVolumeMm3": 0.09285565133526699,
+        "outsideContactCollisionVolumeMm3": 0.015866674829817046,
+        "status": "reject-branch-body-collision",
+        "physicalValidation": "not printed"
+      },
+      "sourceTrianglesPreserved": true,
+      "engineArchiveSha256": "12634a5e4ac6b0ee2dd38f0c80e252920afa14417627cfe2f12de909f57e216c"
+    },
+    {
+      "id": "spore-D3",
+      "label": "Challenge with compact ring junctions",
+      "originalAnalysis": true,
+      "seconds": 15.425788124999999,
+      "contacts": 81,
+      "routed": 78,
+      "gate": {
+        "engineErrors": 0,
+        "engineWarnings": 8,
+        "supportClosed": true,
+        "originalCollisionMeasured": true,
+        "originalCollisionVolumeMm3": 0.08790161027013539,
+        "outsideContactCollisionVolumeMm3": 0.010911902889236873,
+        "status": "reject-branch-body-collision",
+        "physicalValidation": "not printed"
+      },
+      "sourceTrianglesPreserved": true,
+      "engineArchiveSha256": "2eeec0322c9ab2f8a1b92f996da98ef57eb9771fc072dcb6654b2f43ae0e71ca"
+    },
+    {
+      "id": "spore-D4",
+      "label": "Challenge with compact junctions and exact lower-landing clearance",
+      "originalAnalysis": true,
+      "seconds": 17.841818,
+      "contacts": 81,
+      "routed": 75,
+      "gate": {
+        "engineErrors": 3,
+        "engineWarnings": 10,
+        "supportClosed": true,
+        "originalCollisionMeasured": true,
+        "originalCollisionVolumeMm3": 0.07754879367275301,
+        "outsideContactCollisionVolumeMm3": 0.009138078235608785,
+        "status": "reject-engine-errors",
+        "physicalValidation": "not printed"
+      },
+      "sourceTrianglesPreserved": true,
+      "engineArchiveSha256": "708f0a70bbbe813b8388b3b098259dea10f0a8680b3ec6b700654f2b929f5746"
+    },
+    {
+      "id": "spore-D5",
+      "label": "Challenge with horizontal structural rings and 0.01 mm neck clearance",
+      "originalAnalysis": true,
+      "seconds": 14.788874584,
+      "contacts": 81,
+      "routed": 77,
+      "gate": {
+        "engineErrors": 1,
+        "engineWarnings": 8,
+        "supportClosed": true,
+        "originalCollisionMeasured": true,
+        "originalCollisionVolumeMm3": 0.06858008239054597,
+        "outsideContactCollisionVolumeMm3": 0,
+        "status": "reject-engine-errors",
+        "physicalValidation": "not printed"
+      },
+      "sourceTrianglesPreserved": true,
+      "engineArchiveSha256": "f54bc312c434be81644d0069791601703d90a6b63102b378ecf3f1d850927fc2"
+    },
+    {
+      "id": "spore-D6",
+      "label": "Challenge with exact-XY landing height and horizontal structural rings",
+      "originalAnalysis": true,
+      "seconds": 14.645280166000001,
+      "contacts": 81,
+      "routed": 77,
+      "gate": {
+        "engineErrors": 1,
+        "engineWarnings": 8,
+        "supportClosed": true,
+        "originalCollisionMeasured": true,
+        "originalCollisionVolumeMm3": 0.06848531760499751,
+        "outsideContactCollisionVolumeMm3": 0,
+        "status": "reject-engine-errors",
+        "physicalValidation": "not printed"
+      },
+      "sourceTrianglesPreserved": true,
+      "engineArchiveSha256": "0c29ebbf6a66f3b360e60e5057552e7f354309d8be6e7beca7dc99aa04acb7dd"
+    }
+  ],
+  "limits": [
+    "Zero outside-contact collision does not certify intentional contact quality.",
+    "D6 retains one unrouted surface contact, three sub-layer omissions, and warnings for removal/stability.",
+    "Horizontal-ring branch cross-section normal to its axis is reduced in one direction by cos(tilt); strength needs physical evaluation.",
+    "Original-first-start geometry witnesses are not actual custom-candidate G-code validation.",
+    "The accepted 21-specimen plate keeps its previous source meshes and positions; experimental D variants are not included."
+  ]
+}

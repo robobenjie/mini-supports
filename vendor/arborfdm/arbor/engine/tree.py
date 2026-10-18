@@ -738,7 +738,7 @@ class _Router:
         P, tree = self.P, self.tree
         gap = pos[2] - P.z_gap - floor_z
         where = "build plate" if on_plate else "model"
-        if gap < self.min_short_gap() - 1e-9:
+        if pos[2] - floor_z < self.min_short_gap() - 1e-9:
             tree.failed[c.id] = (f"only {pos[2] - floor_z:.2f} mm free under the contact (surface of the "
                                  f"{where} below): less than one layer (+ z_gap) = "
                                  f"{self.min_short_gap():.2f} mm, no support can be printed there")
@@ -1057,11 +1057,90 @@ class _Router:
         new_r.append(r_nom)
         new_merged.append(merged)
 
+    def _landing_neck_clear(self, nid: int, xy, z: float, topz: float) -> bool:
+        """Check the actual lower landing envelope above its one-layer contact zone.
+
+        Slab distances cannot be used here: they include the landing surface itself.
+        Exact triangle-plane sections instead catch a nearby slope or lip entering
+        the thin neck. The envelope matches build.at_root_plane; checking its full
+        disk is conservative where the emitted tube occupies only part of it.
+        """
+        from .build import joint_radius_factors
+        P = self.P
+        node = self.tree.nodes[nid]
+        xy = np.asarray(xy, float)
+        floor = topz - P.tip_penetration
+        intermediate = z - topz > P.tip_length + 0.2
+        shoulder = topz + P.tip_length if intermediate else z
+        height = shoulder - floor
+        radius = P.on_model_tip_diameter / 2.0
+        f_junction, f_bend = joint_radius_factors(P)
+        upper_xy = xy if intermediate else node.position[:2]
+        upper_r = max(self.r_min, self.r_tipbase) if intermediate else node.radius
+        factor = f_bend if intermediate or len(self.tree.children()[nid]) <= 1 else f_junction
+        upper = float(np.linalg.norm(upper_xy - xy)) + upper_r * factor
+        slope = math.tan(math.radians(min(self.angle_print, float(P.branch_angle_deg))))
+        neck = min(float(P.tip_length), height - (upper - radius) / max(slope, 1e-9))
+        envelope = neck >= P.layer_height and 2.0 * radius >= P.line_width
+        # Initialize the exact triangles already shared with short-gap ray tests.
+        self._ray_down(np.array([xy[0], xy[1], shoulder]))
+        neck_clearance = max(0.0, float(P.model_neck_clearance))
+        reach = max(radius, upper) + neck_clearance
+        lo, hi = self._tri_lo, self._tri_hi
+        relevant = ((hi[:, 0] >= xy[0] - reach) & (lo[:, 0] <= xy[0] + reach) &
+                    (hi[:, 1] >= xy[1] - reach) & (lo[:, 1] <= xy[1] + reach))
+        tri = self._tri[relevant]
+        if not len(tri):
+            return True
+        # Exact vertical surface crossings at the disk centre also catch a disk
+        # fully inside the model, where no nearby boundary crosses its perimeter.
+        x, y, tz = tri[:, :, 0], tri[:, :, 1], tri[:, :, 2]
+        a2 = (x[:, 1]-x[:, 0])*(y[:, 2]-y[:, 0])-(x[:, 2]-x[:, 0])*(y[:, 1]-y[:, 0])
+        good = np.abs(a2) > 1e-14
+        x, y, tz, a2 = x[good], y[good], tz[good], a2[good]
+        w0 = ((x[:, 1]-xy[0])*(y[:, 2]-xy[1])-(x[:, 2]-xy[0])*(y[:, 1]-xy[1])) / a2
+        w1 = ((x[:, 2]-xy[0])*(y[:, 0]-xy[1])-(x[:, 0]-xy[0])*(y[:, 2]-xy[1])) / a2
+        w2 = 1-w0-w1
+        hit = (w0 >= -1e-9) & (w1 >= -1e-9) & (w2 >= -1e-9)
+        crossings = np.unique(np.round((w0*tz[:, 0]+w1*tz[:, 1]+w2*tz[:, 2])[hit], 9))
+        start = topz + max(P.layer_height, 0.02) + 1e-6
+        if start >= shoulder:
+            return True
+        step = max(0.01, min(P.layer_height / 2.0, 0.05))
+        for qz in np.linspace(start, shoulder, max(2, int(math.ceil((shoulder-start)/step))+1)):
+            if np.count_nonzero(crossings < qz) % 2:
+                return False
+            r = radius + slope * max(0.0, qz-floor-neck) if envelope else upper
+            # Ramp the hard clearance over one layer; the requested surface
+            # contact is intentional, all material above it must separate.
+            r += neck_clearance * min(1.0, (qz-topz) / max(P.layer_height, 0.02))
+            t = tri[(tri[:, :, 2].min(axis=1) < qz) & (tri[:, :, 2].max(axis=1) > qz)]
+            if not len(t):
+                continue
+            points = []
+            for a, b in ((0, 1), (1, 2), (2, 0)):
+                za, ze = t[:, a, 2], t[:, b, 2]
+                crossed = (za <= qz) != (ze <= qz)
+                fraction = (qz-za[crossed]) / (ze[crossed]-za[crossed])
+                point = t[crossed, a, :2] + fraction[:, None]*(t[crossed, b, :2]-t[crossed, a, :2])
+                # Pair by triangle, independent of which edges intersect.
+                points.extend(zip(np.flatnonzero(crossed), point))
+            if not points:
+                continue
+            points.sort(key=lambda entry: entry[0])
+            pts = np.array([entry[1] for entry in points]).reshape(-1, 2, 2)
+            a, b = pts[:, 0], pts[:, 1]
+            v = b-a
+            u = np.clip(np.einsum('ij,ij->i', xy-a, v) / np.maximum(np.einsum('ij,ij->i', v, v), 1e-20), 0, 1)
+            if np.any(np.linalg.norm(a+u[:, None]*v-xy, axis=1) < r-1e-9):
+                return False
+        return True
+
     def _land_path_clear(self, nid: int, xy, z: float, topz: float) -> bool:
         """Is the landing path of node nid (at (node xy, z)) to the surface point
         (xy, topz) free of the model? The part above topz + tip_length (branch from the node
         to the tip base) must keep `hard` clearance with its interpolated radius; the
-        tip itself touches the surface by design and is not tested. A tilted landing
+        lower neck is checked separately above its local contact zone. A tilted landing
         must also respect the branch angle."""
         P, zb, dz = self.P, self.zb, self.dz
         node = self.tree.nodes[nid]
@@ -1070,7 +1149,8 @@ class _Router:
         off = float(np.linalg.norm(np.asarray(xy, float) - p0[:2]))
         if z - topz <= P.tip_length + 0.2:
             # no intermediate node: one segment from the node down to the surface
-            return off <= max(z - topz - 0.5 * P.tip_length, 0.0) * self.tan + 1e-6
+            return (off <= max(z - topz - 0.5 * P.tip_length, 0.0) * self.tan + 1e-6 and
+                    self._landing_neck_clear(nid, xy, z, topz))
         # with an intermediate node at z1 the tilted segment is node -> (xy, z1); the
         # tip below it is vertical. Measuring the angle down to the surface instead let
         # short drops lean up to ~75 deg: nearly flat branches that print in the air.
@@ -1089,7 +1169,7 @@ class _Router:
             d = self.mdist(k, q[:2])[0]
             if d < (r0 + t * (r1 - r0)) + self.hard - 1e-9:
                 return False
-        return True
+        return self._landing_neck_clear(nid, xy, z, topz)
 
     def _land(self, nid: int, xy, z: float, topz: float, r_nom: float) -> None:
         P, tree = self.P, self.tree
@@ -1120,7 +1200,12 @@ class _Router:
                     q = xy + off
                     t = self.grid.top_below(q, z)
                     if t is not None and t > self.zb + 1e-6:
-                        spots.append((-t, float(np.linalg.norm(off)), q, t))
+                        # Grid heights describe a cell centre, not this candidate
+                        # XY. Anchor to the actual surface so a sloped landing
+                        # cannot bury the neck or leave its bottom floating.
+                        t = self._ray_down(np.array([q[0], q[1], z]))
+                        if t is not None and t > self.zb + 1e-6:
+                            spots.append((-t, float(np.linalg.norm(off)), q, t))
             spots.sort(key=lambda s: (s[0], s[1]))
             for _, _, q, t in spots:
                 if self._land_path_clear(nid, q, z, t):

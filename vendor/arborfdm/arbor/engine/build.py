@@ -149,7 +149,8 @@ def joint_radius_factors(params: SupportParams) -> tuple[float, float]:
     return max(float(params.junction_radius_factor), cover), cover
 
 
-def tube(points: np.ndarray, radii: np.ndarray, segs: int) -> Optional[mf.Manifold]:
+def tube(points: np.ndarray, radii: np.ndarray, segs: int,
+         horizontal: Optional[list[bool]] = None) -> Optional[mf.Manifold]:
     """One closed tube through points (bottom to top) with linearly varying radius.
 
     Rings are perpendicular to the bisector of the adjacent segments and use a parallel
@@ -170,6 +171,10 @@ def tube(points: np.ndarray, radii: np.ndarray, segs: int) -> Optional[mf.Manifo
     if n > 2:
         b = seg[:-1] + seg[1:]
         dirs[1:-1] = b / np.linalg.norm(b, axis=1)[:, None]
+    if horizontal is not None:
+        # Experimental structural sections follow the router's horizontal slabs.
+        # Tip end rings can retain their contact-oriented cap plane.
+        dirs[np.asarray(horizontal, dtype=bool)] = (0., 0., 1.)
     ang = np.arange(segs) * (2 * math.pi / segs)
     ca, sa = np.cos(ang), np.sin(ang)
     F0 = _frame(dirs[0])
@@ -263,6 +268,70 @@ def tree_solids(tree: SupportTree, params: SupportParams, progress: Optional[Pro
     foot_radius = getattr(tree, "foot_radius", {})
     z_base = getattr(tree, "z_base", support_base_z(P))
     ball = P.tip_shape == "ball"
+    root_floors: dict[int, Optional[float]] = {}
+    root_limits: dict[int, Optional[tuple[mf.Manifold, float]]] = {}
+
+    def at_root_plane(solid: Optional[mf.Manifold], node_id: int) -> Optional[mf.Manifold]:
+        """Preserve the planned bottom plane of a support standing on the model.
+
+        Inclined cone end rings and the lower sphere of a joint skirt extend below
+        their centre. A MODEL_FOOT's position is the requested bottom of the support,
+        not a sphere centre: letting those primitives dip below it introduces
+        unplanned penetration and can create an early support island. Trim only
+        solids belonging to that root; a neighbouring tree may start lower down.
+        """
+        if solid is None:
+            return None
+        trail = []
+        cur = node_id
+        while cur not in root_floors and nodes[cur].parent is not None:
+            trail.append(cur)
+            cur = nodes[cur].parent
+        if cur not in root_floors:
+            root_floors[cur] = float(nodes[cur].position[2]) if nodes[cur].kind == NodeKind.MODEL_FOOT else None
+        floor = root_floors[cur]
+        for nid in trail:
+            root_floors[nid] = floor
+        if floor is None:
+            return solid
+        solid = solid.trim_by_plane((0.0, 0.0, 1.0), floor)
+        # Cache the actual root as well: a previously visited descendant in
+        # root_floors may have ended the walk above before reaching it.
+        while nodes[cur].parent is not None:
+            cur = nodes[cur].parent
+        if cur not in root_limits:
+            root_limits[cur] = None
+            root = nodes[cur]
+            children = [nodes[cid] for cid in ch[cur]]
+            # Short cavity contacts already have a narrow constant section. Only
+            # constrain a landing that grows into a branch/junction shoulder.
+            if children and all(c.kind in (NodeKind.BRANCH, NodeKind.TRUNK) for c in children):
+                height = min(float(c.position[2]) for c in children) - floor
+                radius = float(root.radius)
+                upper = max(float(np.linalg.norm(c.position[:2] - root.position[:2])) +
+                            c.radius * (f_junction if len(ch[c.id]) > 1 else f_bend)
+                            for c in children)
+                slope = math.tan(math.radians(min(phi, float(P.branch_angle_deg))))
+                if height > 1e-6 and slope > 1e-6 and upper > radius:
+                    neck = min(float(P.tip_length), height - (upper - radius) / slope)
+                    # A thinner-than-one-line neck is not made longer; its
+                    # printability must instead be resolved by parameter validation.
+                    if neck >= P.layer_height and 2.0 * radius >= P.line_width:
+                        mid = root.position + [0.0, 0.0, neck]
+                        top = root.position + [0.0, 0.0, height + 1e-4]
+                        upper_radius = radius + slope * (height + 1e-4 - neck)
+                        stem = cone_between(root.position, mid, radius, radius, segs)
+                        taper = cone_between(mid, top, radius, upper_radius, segs)
+                        envelope = mf.Manifold.batch_boolean([stem, taper], mf.OpType.Add)
+                        root_limits[cur] = (envelope, floor + height)
+        limit = root_limits[cur]
+        if limit is not None:
+            envelope, shoulder_z = limit
+            # Trim the unchecked landing span to a printable contact neck and
+            # taper. This also removes spherical skirt bulges in that span. The
+            # already-routed tree above the first shoulder is preserved exactly.
+            solid = (solid ^ envelope) + solid.trim_by_plane((0.0, 0.0, 1.0), shoulder_z)
+        return solid
 
     def seg_radii(child_id: int) -> tuple[float, float]:
         """(bottom, top) radius of the segment child -> parent."""
@@ -274,12 +343,37 @@ def tree_solids(tree: SupportTree, params: SupportParams, progress: Optional[Pro
 
     def joint(n, R: float):
         """Sphere of radius R at node n whose underside is buried in the branch below."""
+        if getattr(P, "compact_junctions", False) and n.kind in (NodeKind.BRANCH, NodeKind.TRUNK) and n.parent is not None:
+            # Experimental slab-aligned envelope: contain the horizontal
+            # structural rings rather than an entire sphere (or inclined rings)
+            # protruding below the slabs checked by routing. The lower ring
+            # follows the existing incoming branch, keeping a supported convex
+            # transition instead of a flat floating underside.
+            parent = nodes[n.parent]
+            incoming = n.position - parent.position
+            length = float(np.linalg.norm(incoming))
+            if length > 1e-6:
+                incoming /= length
+                axes = [np.array([0., 0., 1.])]
+                # Circumscribe any parallel-transported polygon phase with a
+                # small strict overlap. No spherical inradius inflation needed.
+                cover = 1.001 / math.cos(math.pi / segs)
+                radius = n.radius * cover * (max(1., P.junction_radius_factor) if len(ch[n.id]) > 1 else 1.)
+                epsilon = 1e-3
+                rings = [cone_between(n.position - axis * epsilon,
+                                      n.position + axis * epsilon,
+                                      radius, radius, segs) for axis in axes]
+                lower_radius, _ = seg_radii(n.id)
+                rings.append(cone_between(parent.position - axes[0] * epsilon,
+                                          parent.position + axes[0] * epsilon,
+                                          lower_radius, lower_radius, segs))
+                return at_root_plane(mf.Manifold.batch_hull(rings), n.id)
         if n.parent is None:
-            return sphere_at(n.position, R, ssegs)
+            return at_root_plane(sphere_at(n.position, R, ssegs), n.id)
         rl, rt = seg_radii(n.id)
         L = float(np.linalg.norm(nodes[n.parent].position - n.position))
-        return joint_at(n.position, R, nodes[n.parent].position,
-                        lambda s_: rt + (rl - rt) * min(s_ / max(L, 1e-9), 1.0), phi, ssegs)
+        return at_root_plane(joint_at(n.position, R, nodes[n.parent].position,
+                        lambda s_: rt + (rl - rt) * min(s_ / max(L, 1e-9), 1.0), phi, ssegs), n.id)
 
     if tubes:
         chains = _chains(tree, ch)
@@ -293,15 +387,19 @@ def tree_solids(tree: SupportTree, params: SupportParams, progress: Optional[Pro
                 rad[k] = rt
                 if k == 1:
                     rad[0] = rl
-            m = tube(pts, rad, segs) if len(chain) > 2 else None
+            compact = getattr(P, "compact_junctions", False)
+            horizontal = [nodes[i].kind != NodeKind.TIP for i in chain] if compact else None
+            m = tube(pts, rad, segs, horizontal) if len(chain) > 2 or compact else None
             if m is not None:
-                out.append(m)
+                out.append(at_root_plane(m, chain[-1]))
             else:
                 for k in range(1, len(chain)):
                     rl, rt = seg_radii(chain[k])
-                    s_ = cone_between(pts[k - 1], pts[k], rl if k == 1 else rad[k - 1], rt, segs)
+                    lower = rl if k == 1 else rad[k - 1]
+                    s_ = tube(pts[k - 1:k + 1], np.array([lower, rt]), segs,
+                              horizontal[k - 1:k + 1]) if compact else cone_between(pts[k - 1], pts[k], lower, rt, segs)
                     if s_ is not None:
-                        out.append(s_)
+                        out.append(at_root_plane(s_, chain[k]))
             top = nodes[chain[-1]]
             if len(ch[top.id]) == 1 and top.kind in (NodeKind.BRANCH, NodeKind.TRUNK):
                 out.append(joint(top, top.radius * f_bend))   # bend break
@@ -314,9 +412,10 @@ def tree_solids(tree: SupportTree, params: SupportParams, progress: Optional[Pro
             if n.parent is None:
                 continue
             rl, rt = seg_radii(n.id)
-            s_ = cone_between(nodes[n.parent].position, n.position, rl, rt, segs)
+            s_ = tube(np.array([nodes[n.parent].position, n.position]), np.array([rl, rt]), segs,
+                      [True, n.kind != NodeKind.TIP]) if getattr(P, "compact_junctions", False) else cone_between(nodes[n.parent].position, n.position, rl, rt, segs)
             if s_ is not None:
-                out.append(s_)
+                out.append(at_root_plane(s_, n.id))
             if len(ch[n.id]) == 1 and n.kind in (NodeKind.BRANCH, NodeKind.TRUNK):
                 out.append(joint(n, n.radius * f_bend))
 

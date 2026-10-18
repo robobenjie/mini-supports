@@ -18,6 +18,7 @@ const option=(key,fallback)=>{const i=process.argv.indexOf(key);return i<0?fallb
 const modelIds=option('--models','bare-arm,spanner-hand').split(',');
 const variantIds=option('--variants','B0,B1,C1,C2,C3').split(',');
 const rotateY=Number(option('--rotate-y','0'));if(!Number.isFinite(rotateY))throw Error('Invalid Y rotation');
+const originalAnalysis=process.argv.includes('--original-analysis');
 const outputRoot=path.resolve('test-results/research/generated');
 await mkdir(outputRoot,{recursive:true});
 const candidates=JSON.parse(await readFile('test-results/research/candidate-inventory.json','utf8'));
@@ -30,7 +31,14 @@ const variants={
  C3:{label:'C1 with denser contacts',overrides:{layer_height:.06,tip_penetration:0,z_gap:.06,tip_diameter:.36,contact_spacing:1.8,edge_spacing:1.2}},
  R1:{label:'C1 with model-foot supports disabled',overrides:{layer_height:.06,tip_penetration:0,z_gap:.06,tip_diameter:.36,allow_on_model:false}},
  R2:{label:'C2 with model-foot supports disabled',overrides:{layer_height:.06,tip_penetration:0,z_gap:.06,tip_diameter:.36,branch_min_diameter:1.2,trunk_diameter:2.8,brace_diameter:1.1,brace_spacing_z:6,allow_on_model:false}},
- R3:{label:'R2 with footprint raft',overrides:{layer_height:.06,tip_penetration:0,z_gap:.06,tip_diameter:.36,branch_min_diameter:1.2,trunk_diameter:2.8,brace_diameter:1.1,brace_spacing_z:6,allow_on_model:false,raft_enabled:true,raft_lift_auto:false,raft_lift:0}}
+ R3:{label:'R2 with footprint raft',overrides:{layer_height:.06,tip_penetration:0,z_gap:.06,tip_diameter:.36,branch_min_diameter:1.2,trunk_diameter:2.8,brace_diameter:1.1,brace_spacing_z:6,allow_on_model:false,raft_enabled:true,raft_lift_auto:false,raft_lift:0}},
+ D0:{label:'Full-resolution challenge: explicit gap and strengthened branches',overrides:{layer_height:.06,tip_penetration:0,z_gap:.06,tip_diameter:.36,branch_min_diameter:1.2,trunk_diameter:2.8,brace_diameter:1.1,brace_spacing_z:6}},
+ D1:{label:'Challenge with smaller junction envelope',overrides:{layer_height:.06,tip_penetration:0,z_gap:.06,tip_diameter:.36,branch_min_diameter:1.2,trunk_diameter:2.8,brace_diameter:1.1,brace_spacing_z:6,junction_radius_factor:1,circle_segments:24}},
+ D2:{label:'Challenge with narrow model-root necks and smaller junctions',overrides:{layer_height:.06,tip_penetration:0,z_gap:.06,tip_diameter:.36,branch_min_diameter:1.2,trunk_diameter:2.8,brace_diameter:1.1,brace_spacing_z:6,junction_radius_factor:1,circle_segments:24}},
+ D3:{label:'Challenge with compact ring junctions',overrides:{compact_junctions:true,layer_height:.06,tip_penetration:0,z_gap:.06,tip_diameter:.36,branch_min_diameter:1.2,trunk_diameter:2.8,brace_diameter:1.1,brace_spacing_z:6,junction_radius_factor:1,circle_segments:24}},
+ D4:{label:'Challenge with compact junctions and exact lower-landing clearance',overrides:{compact_junctions:true,layer_height:.06,tip_penetration:0,z_gap:.06,tip_diameter:.36,branch_min_diameter:1.2,trunk_diameter:2.8,brace_diameter:1.1,brace_spacing_z:6,junction_radius_factor:1,circle_segments:24}},
+ D5:{label:'Challenge with horizontal structural rings and 0.01 mm neck clearance',overrides:{model_neck_clearance:.01,compact_junctions:true,layer_height:.06,tip_penetration:0,z_gap:.06,tip_diameter:.36,branch_min_diameter:1.2,trunk_diameter:2.8,brace_diameter:1.1,brace_spacing_z:6,junction_radius_factor:1,circle_segments:24}},
+ D6:{label:'Challenge with exact-XY landing height and horizontal structural rings',overrides:{model_neck_clearance:.01,compact_junctions:true,layer_height:.06,tip_penetration:0,z_gap:.06,tip_diameter:.36,branch_min_diameter:1.2,trunk_diameter:2.8,brace_diameter:1.1,brace_spacing_z:6,junction_radius_factor:1,circle_segments:24}}
 };
 for(const id of variantIds)if(!variants[id])throw Error(`Unknown variant ${id}`);
 const manifestPath=path.join(outputRoot,'manifest.json');
@@ -68,6 +76,13 @@ def generate_research(config_json):
     proxy_collapsed=int((~keep).sum());faces=faces[keep]
     vertices+=np.array(cfg['translation'])
     model=trimesh.Trimesh(vertices=vertices,faces=faces,process=False)
+    if cfg.get('original_analysis'):
+        fullv=np.frombuffer(Path('/original.positions').read_bytes(),dtype=np.float32).reshape(-1,3).astype(float)
+        fullv,fullinv=np.unique(fullv,axis=0,return_inverse=True)
+        fullv+=np.array(cfg['translation'])
+        source=trimesh.Trimesh(vertices=fullv,faces=fullinv.reshape(-1,3),process=False)
+        # Canonical solid topology for analysis; the exported original stays unchanged.
+        model=manifold_to_trimesh(trimesh_to_manifold(source))
     params=PROFILES['nozzle_02_normal'].params.updated(raft_enabled=True,overhang_angle_deg=55,z_gap=.03).updated(**cfg['overrides'])
     if cfg.get('fixed_lift') is not None:params=params.updated(raft_lift_auto=False,raft_lift=cfg['fixed_lift'])
     result=generate(model,params,progress=Progress(progress))
@@ -157,11 +172,11 @@ for(const modelId of modelIds){
   const variant=variants[variantId],id=`${modelId}${rotateY?'-ry'+rotateY:''}-${variantId}`,dir=path.join(outputRoot,id);await mkdir(dir,{recursive:true});
   console.log(`START ${id}`);lastStage='';const began=performance.now();
   const overrides={...(modelId==='spore'?{raft_enabled:false}:{}),...variant.overrides};
-  py.globals.set('research_config',JSON.stringify({id,translation,rotation_matrix:rotation.toArray(),overrides,fixed_lift:variantId==='B0'?null:fixedLift}));
+  py.globals.set('research_config',JSON.stringify({id,translation,rotation_matrix:rotation.toArray(),overrides,original_analysis:originalAnalysis,fixed_lift:variantId==='B0'?null:fixedLift}));
   let summary;
   try{summary=JSON.parse(await py.runPythonAsync('generate_research(research_config)'))}catch(error){await writeFile(path.join(dir,'generation-error.txt'),String(error));throw error}
   if(variantId==='B0')fixedLift=summary.modelLift;
-  summary.id=id;summary.modelId=modelId;summary.variantId=variantId;summary.variantLabel=variant.label;summary.sourcePath=candidate.path;summary.sourceSha256=hash(bytes);summary.sourceTriangles=original.attributes.position.count/3;summary.translation=translation;summary.rotationXYZ=[modelId==='spore'?-90:0,rotateY,0];summary.scaleXYZ=[1,1,1];summary.fixedLiftControl=variantId!=='B0';summary.elapsedSeconds=(performance.now()-began)/1000;
+  summary.id=id;summary.modelId=modelId;summary.variantId=variantId;summary.variantLabel=variant.label;summary.originalAnalysis=originalAnalysis;summary.engineArchiveSha256=manifest.engineArchiveHash;summary.generatorSourceSha256=manifest.generatorSourceHash;summary.sourcePath=candidate.path;summary.sourceSha256=hash(bytes);summary.sourceTriangles=original.attributes.position.count/3;summary.translation=translation;summary.rotationXYZ=[modelId==='spore'?-90:0,rotateY,0];summary.scaleXYZ=[1,1,1];summary.fixedLiftControl=variantId!=='B0';summary.elapsedSeconds=(performance.now()-began)/1000;
   const files={summary:path.join(dir,'summary.json'),model:path.join(dir,'model.stl'),supports:path.join(dir,'supports.stl'),raft:path.join(dir,'raft.stl'),assembly:path.join(dir,'assembly.3mf')};
   for(const kind of ['supports','raft'])if(py.FS.analyzePath('/'+kind+'.stl').exists)await writeFile(files[kind],py.FS.readFile('/'+kind+'.stl'));else files[kind]=null;
   const fullModel=original.clone();fullModel.translate(translation[0],translation[1],translation[2]+summary.bedShift);
