@@ -1,13 +1,24 @@
-/** Add sidecar audit metadata only. Never rewrites plate layout, meshes or G-code. */
+/** Add legacy inclined-cap sidecar metadata only. Never rewrites meshes or G-code.
+ * node scripts/research-contact-metadata.mjs KIT_DIR [--exclude H0,N5]
+ * Surface-aligned short contacts require the separate full custom-island audit.
+ */
 import {readFile,writeFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import path from 'node:path';
 const folder=path.resolve(process.argv[2]||'test-results/research/print-kit');
 const manifestPath=path.join(folder,'plate-manifest.json'),manifestBytes=await readFile(manifestPath),plate=JSON.parse(manifestBytes);
+const options=process.argv.slice(3);let excludedIds=[];
+if(options.length){
+ if(options.length!==2||options[0]!=='--exclude'||!options[1])throw Error('Expected --exclude ID,ID after KIT_DIR.');
+ excludedIds=options[1].split(',');
+ if(new Set(excludedIds).size!==excludedIds.length||excludedIds.some(id=>!plate.specimens.some(s=>s.id===id)))throw Error('Excluded IDs must be unique specimens in the manifest.');
+}
 const add=(p,t)=>p.map((v,d)=>v+t[d]);
 const metadata={schemaVersion:1,sourcePlateManifest:manifestPath,sourcePlateManifestSha256:createHash('sha256').update(manifestBytes).digest('hex'),createdAt:new Date().toISOString(),coordinateFrame:'All contact, tip, parent, omitted-contact and issue positions below are in final plate XYZ millimetres. Generated model/support STL paths are in specimen bed frame; apply plateTranslationMm once.',interpretation:['Original-model and generated-support meshes are merged into each app-supported object before slicing. Their normal extrusion role labels do not distinguish the two materials/parts.','The real Arbor tips are inclined truncated cones. A cap is perpendicular to the parent-to-tip axis, not horizontal. Its center Z is not its upper rim Z.','Cap Z interval is the conservative continuous-circle bound; the actual 12-sided disk can have slightly less vertical extent.','Emitted paths near the tip are an occupancy check, not proof of a correctly separated model-to-support gap. Intersections and overlapping slicer offsets can make path attribution ambiguous.','A useful limited support-survival check is near the cone axis 1–2 actual layers below its lowest rim, ideally excluding positions occupied by the original model cross-section.','No-path above a cap upper rim is expected and cannot establish a vanished support. Missing crowns require inspecting the actual cap plane, slicer layer midplanes and emitted width.','Native-support rows have no expected Arbor caps. Inspect their native Support/Support interface roles and original-model start regions separately.'],specimens:[]};
-for(const row of plate.specimens.filter(s=>s.researchSummary)){
+metadata.excludedSpecimenIds=excludedIds;
+for(const row of plate.specimens.filter(s=>s.researchSummary&&!excludedIds.includes(s.id))){
  const summary=JSON.parse(await readFile(row.researchSummary,'utf8')),t=row.translation,native=row.settings?.enable_support==='1',nodes=new Map(summary.treeNodes.map(n=>[n.id,n]));
+ if(summary.params.surface_aligned_tips&&!native)throw Error(`${row.id}: surface-aligned caps need the full custom-island audit; explicitly exclude this specimen from legacy contact metadata.`);
  const record={id:row.id,assemblyIndex:row.assemblyIndex,label:row.label,nativeSupports:native,plateTranslationMm:t,sourceStlPath:summary.sourcePath,sourceSha256:summary.sourceSha256,originalModelBedStl:row.files.find(f=>path.basename(f)==='model.stl'),supportBedStl:native?null:row.files.find(f=>path.basename(f)==='supports.stl'),raftBedStl:native?null:row.files.find(f=>path.basename(f)==='raft.stl'),researchSummary:row.researchSummary,sourceRotationXYZDegrees:summary.rotationXYZ,sourceToBedTranslationMm:summary.translation.map((v,d)=>v+(d===2?summary.bedShift:0)),params:native?null:summary.params,originalGeometryIntegrity:summary.originalGeometryIntegrity??null,contacts:[],omittedContacts:[],warnings:[]};
  if(!native){
   record.warnings=summary.issues.filter(i=>i.severity!=='info').map(i=>({...i,positionPlateMm:i.position?add(i.position,t):null}));

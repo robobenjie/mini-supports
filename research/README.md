@@ -173,3 +173,55 @@ conservative; success on the synthetic cage does not establish coverage of all
 real cages. The existing validated print kits are unchanged. Physical follow-up
 should compare identical parts with intact versus split rafts, recording removal
 time, necessary branch cuts, retained fragments, and print stability.
+
+## Unified physical screening plate
+
+The current handoff combines the original 21 calibration/part specimens, the
+matched H0/N5 complete miniatures, a new R0/R1 pad-removal comparison and a
+T3 lateral-bracing variant on one 256 mm A1 plate. Its 26 labeled specimens
+occupy a 216 × 182.805 mm reserved envelope. All 23 earlier models, supports,
+labels and object settings are reused; only XY placement changes. T3 was added
+in spare space without moving the existing 25 specimens. The original separate
+print kits remain available.
+
+R0/R1 are controlled fixtures with the same model, eight contacts, support trees
+and broad pad perimeter. R1 uses the production bent-seam planner and omits two
+reconnecting braces. The seam preserves the entire model-base foundation and
+all eight support feet. The central model grows without a broad unsupported
+roof, and its eight arm starts use 0.36 mm caps with a nominal 0.06 mm gap. This
+tests the combined seam-and-brace separation policy: pad peeling, flexibility
+and cage handling. The model permits upward escape after the base and contacts
+release, so this is not proof of removal from strongly interlocked cavities.
+
+Reproduction uses `research-raft-coupon.mjs`, `research-unified-layout.mjs`,
+`research-slice.mjs`, `research-contact-metadata.mjs`, `research-toolpaths.mjs`,
+`research-original-geometry.py`, `research-custom-islands.mjs`,
+`research-native-islands.mjs`, `research-raft-audit.mjs`,
+`research-stability-y.mjs`, `research-append-t3.mjs` and
+`research-unified-validate.mjs`. Private inputs,
+models and final artifacts remain under ignored
+`test-results/research/unified-print-kit/`. The legacy inclined-cap sidecar
+explicitly excludes H0/N5; their independent full custom/native checks must
+complete before final validation. The unified validator binds all audits to
+the actual delivered GUI archives and their contained G-code.
+
+The observation guide and score sheet are deferred until the user starts the
+print. The plate map is already available. This is one specimen per setting:
+it screens tradeoffs, while reliability requires repeating finalists at swapped
+positions.
+
+T3 retains T2's original model, 1.8 mm columns, four XZ braces, 0.36 mm caps
+and 0.06 mm contact gap. Six 1.0 mm braces connect the same pad at Y = ±7 mm
+to the columns at Z = 23 mm, adding an axial load path against bed-Y motion.
+The structural material from T2 is preserved; only the raised identifier changes.
+This tests additional directional bracing as a package, including its extra mass.
+
+The mechanics sidecar records the solid-volume mass-height proxy
+`M_x/(rho*a_y) = integral(z dV)` and shaft `I = pi*d^4/64`. T2/T3's shafts have
+5.0625 times T1's bending second moment, but this is not a whole-structure
+stiffness or reliability prediction. A later heuristic should combine supported
+mass and height with directional frame compliance, including brace load paths.
+Contact gaps, joint flexibility, layer anisotropy, cooling, buckling and resonance
+remain physical unknowns. See the
+[MIT cantilever exercise](https://ocw.mit.edu/courses/2-080j-structural-mechanics-fall-2013/d822a94a5e00663ee03a4909086181bb_MIT2_080JF13_ProbSet_10_Sol.pdf)
+for the ideal beam relationship; no calibrated material modulus is assumed.
