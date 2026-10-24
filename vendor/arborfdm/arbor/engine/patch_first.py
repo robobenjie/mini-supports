@@ -53,6 +53,7 @@ class PatchPlan:
     context: object
     report: dict
     split: bool
+    contacts: list[Contact] = field(default_factory=list)
 
 
 @dataclass
@@ -227,7 +228,7 @@ def plan_patches(mesh, contacts, params, progress=None, previous=None):
                            caster, labels, regions, axis, float(mesh.bounds.mean(axis=0)[axis]))
     if context.model.status() != mf.Error.NoError:
         return PatchPlan([], context, dict(seconds=time.perf_counter() - start,
-                         reason="Exact model solid unavailable", terminals=0), params.removal_groups)
+                         reason="Exact model solid unavailable", terminals=0), params.removal_groups, active)
     axis, center = context.axis, context.center
     reusable = (_reusable_regions(previous, params)
                 if previous is not None and params.removal_groups and not previous.split else set())
@@ -417,7 +418,7 @@ def plan_patches(mesh, contacts, params, progress=None, previous=None):
                   fittedAreaMm2=sum(p.report["projectedAreaMm2"] for p in planned),
                   terminals=len(planned), axis=axis, center=center, **counts)
     progress.update(1, "Underside patches planned")
-    return PatchPlan(planned, context, report, params.removal_groups)
+    return PatchPlan(planned, context, report, params.removal_groups, active)
 
 
 def _prune_unprintable_patch_routes(tree, line_width):
@@ -440,13 +441,25 @@ def _prune_unprintable_patch_routes(tree, line_width):
             node = tree.nodes.get(node.parent)
     if not rejected:
         return set()
+    rejected_contacts = {tree.nodes[nid].contact_id for nid in rejected}
+    _prune_tip_paths(tree, rejected, internal)
+    if not hasattr(tree, "failed"):
+        tree.failed = {}
+    for cid in rejected_contacts:
+        tree.failed[cid] = "Patch foundation narrowed below one printable line; original point contacts retained"
+        getattr(tree, "contact_normals", {}).pop(cid, None)
+        getattr(tree, "contact_groups", {}).pop(cid, None)
+    return rejected_contacts
+
+
+def _prune_tip_paths(tree, tip_ids, removable_contacts):
+    """Remove exclusive dead paths and their braces; retain every shared trunk."""
     children = tree.children()
     removed, segments = {}, []
-    rejected_contacts = {tree.nodes[nid].contact_id for nid in rejected}
-    for nid in rejected:
+    for nid in tip_ids:
         while nid in tree.nodes:
             node = tree.nodes[nid]
-            if children[nid] or (node.contact_id is not None and node.contact_id not in internal):
+            if children[nid] or (node.contact_id is not None and node.contact_id not in removable_contacts):
                 break
             parent = tree.nodes.get(node.parent)
             if parent is not None:
@@ -454,14 +467,8 @@ def _prune_unprintable_patch_routes(tree, line_width):
                 children[parent.id].remove(nid)
             removed[nid] = tree.nodes.pop(nid)
             nid = node.parent
-    stability = getattr(tree, "_stability_braces", [])
-    discarded_braces = []
-    for root, foot, brace in stability:
-        if root in removed:
-            discarded_braces.append(brace)
-            if foot in tree.nodes and not children[foot]:
-                removed[foot] = tree.nodes.pop(foot)
-    tree._stability_braces = [b for b in stability if b[0] not in removed and b[1] not in removed]
+    if not removed:
+        return 0
     removed_points = np.array([n.position for n in removed.values()])
     retained_points = np.array([n.position for n in tree.nodes.values()]).reshape(-1, 3)
     def on_removed_path(point):
@@ -478,6 +485,16 @@ def _prune_unprintable_patch_routes(tree, line_width):
                 if np.linalg.norm(point - (a + t * delta)) < 1e-7:
                     return True
         return False
+    stability = getattr(tree, "_stability_braces", [])
+    discarded_braces = []
+    for root, foot, brace in stability:
+        if root in removed or any(on_removed_path(p) for p in brace[:2]):
+            discarded_braces.append(brace)
+            if foot in tree.nodes and not children[foot]:
+                removed[foot] = tree.nodes.pop(foot)
+    tree._stability_braces = [b for b in stability if b[0] not in removed and b[1] not in removed]
+    removed_points = np.array([n.position for n in removed.values()])
+    retained_points = np.array([n.position for n in tree.nodes.values()]).reshape(-1, 3)
     def keep_brace(brace):
         if any(np.array_equal(brace[0], b[0]) and np.array_equal(brace[1], b[1])
                for b in discarded_braces):
@@ -488,13 +505,42 @@ def _prune_unprintable_patch_routes(tree, line_width):
             setattr(tree, attr, [b for b in getattr(tree, attr) if keep_brace(b)])
     for nid in removed:
         getattr(tree, "foot_radius", {}).pop(nid, None)
-    if not hasattr(tree, "failed"):
-        tree.failed = {}
-    for cid in rejected_contacts:
-        tree.failed[cid] = "Patch foundation narrowed below one printable line; original point contacts retained"
-        getattr(tree, "contact_normals", {}).pop(cid, None)
-        getattr(tree, "contact_groups", {}).pop(cid, None)
-    return rejected_contacts
+    return len(removed)
+
+
+def _patch_covered_contacts(contacts, patches, params):
+    """Require actual roof coverage at the contact's height, including its rim.
+
+    Use only successfully rooted roofs, not planned tiles, fan footprints or
+    bounding boxes. A center and eight perimeter probes conservatively keep
+    pins beside patch seams, holes and edges. Manual contacts remain explicit.
+    """
+    roofs = [(p, np.asarray(p.roof.bounding_box()).reshape(2, 3)) for p in patches]
+    angles = np.arange(8) * math.pi / 4
+    ring = np.vstack(([0., 0.], np.column_stack((np.cos(angles), np.sin(angles)))))
+    tolerance = max(.015, min(.04, params.layer_height / 2))
+    covered = {}
+    for contact in contacts:
+        if not contact.enabled or contact.manual or contact.support_terminal or contact.normal[2] >= -.1:
+            continue
+        radius = max(params.line_width / 2, (contact.tip_diameter or params.tip_diameter) / 2)
+        offsets = ring * radius
+        probes = np.tile(contact.position, (len(offsets), 1))
+        probes[:, :2] += offsets
+        probes[:, 2] -= offsets @ contact.normal[:2] / contact.normal[2] + params.patch_gap
+        owners = set()
+        for point in probes:
+            for patch, bounds in roofs:
+                if np.any(point < bounds[0] - tolerance) or np.any(point > bounds[1] + tolerance):
+                    continue
+                if patch.roof.ray_cast(point + [0, 0, tolerance], point - [0, 0, tolerance]):
+                    owners.add(patch.terminal.id)
+                    break
+            else:
+                break
+        else:
+            covered[contact.id] = sorted(owners)
+    return covered
 
 
 def attach_patches(tree, plan, mesh, params):
@@ -503,6 +549,17 @@ def attach_patches(tree, plan, mesh, params):
     terminals = {n.contact_id for n in tree.nodes.values() if n.kind == NodeKind.TIP}
     attached = [patch for patch in plan.patches if patch.terminal.id in terminals]
     failed = [patch for patch in plan.patches if patch.terminal.id not in terminals]
+    covered = _patch_covered_contacts(plan.contacts, attached, params)
+    redundant = [n.id for n in tree.nodes.values()
+                 if n.kind == NodeKind.TIP and n.contact_id in covered]
+    removed_nodes = _prune_tip_paths(tree, redundant, set(covered))
+    tree.patch_covered_contacts = covered
+    for cid in covered:
+        getattr(tree, "failed", {}).pop(cid, None)
+        getattr(tree, "contact_normals", {}).pop(cid, None)
+        getattr(tree, "contact_groups", {}).pop(cid, None)
+    if hasattr(tree, "short_contact_fits"):
+        tree.short_contact_fits = [r for r in tree.short_contact_fits if r["contactId"] not in covered]
     tree.patch_solids = [patch.solid for patch in attached]
     tree.patch_contact_keepouts = [patch.gap for patch in attached]
     tree.patch_report = [{**patch.report, "status": "built", "terminalId": patch.terminal.id}
@@ -516,6 +573,8 @@ def attach_patches(tree, plan, mesh, params):
     tree.patch_release_preplanned = True
     tree.patch_terminal_top_z = {patch.terminal.id: patch.report["bounds"][5] for patch in attached}
     tree.patch_first_report = {**plan.report, "routedTerminals": len(attached),
+        "coveredContactIds": sorted(covered), "redundantTipsRemoved": len(redundant),
+        "redundantNodesRemoved": removed_nodes,
         "failedTerminals": [patch.terminal.id for patch in failed],
         "routedAreaMm2": sum(patch.report["projectedAreaMm2"] for patch in attached)}
     grips = sum(patch.report["grip"] is not None for patch in attached)

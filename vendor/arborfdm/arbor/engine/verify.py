@@ -108,11 +108,14 @@ def _root_of(tree: SupportTree):
 def _check_unrouted(contacts, tree, issues):
     failed = getattr(tree, "failed", {}) or {}
     routed = _routed_contact_ids(tree)
+    # A contact can be supported by an exact, successfully rooted patch roof
+    # after its redundant pin and exclusive branch have been removed.
+    covered = set(getattr(tree, "patch_covered_contacts", {}))
     by_id = {c.id: c for c in contacts}
     for c in contacts:
         if not c.enabled:
             continue
-        if c.id in routed and c.id not in failed:
+        if c.id in covered or (c.id in routed and c.id not in failed):
             continue
         why = failed.get(c.id, "no support was built for this contact")
         if "less than one layer" in why:
@@ -125,7 +128,7 @@ def _check_unrouted(contacts, tree, issues):
         issues.append(Issue("error", "unrouted_contact",
                             f"Contact {c.id} ({c.reason.value}) is not supported: {why}",
                             np.asarray(c.position, float).copy(), c.id))
-    return {cid for cid in routed if cid not in failed and cid in by_id}
+    return {cid for cid in routed | covered if cid in by_id and (cid in covered or cid not in failed)}
 
 
 def _check_regions(analysis: AnalysisResult, contacts, routed_ids, params, issues):
@@ -1033,6 +1036,7 @@ def support_stats(mesh, contacts, tree: SupportTree, support_mesh, raft_mesh,
         "model_contacts": len(tips) + len(pads),
         "tip_contacts": len(tips),
         "patch_terminals": sum(n.kind == NodeKind.TIP and n.contact_id in terminals for n in nodes),
+        "patch_covered_contacts": len(getattr(tree, "patch_covered_contacts", {})),
         "model_feet": len(pads),
         "max_tree_height_mm": float(height),
         "max_slenderness": float(max((r["slenderness"] for r in recs), default=0.0)),
@@ -1069,7 +1073,7 @@ def verify(mesh: trimesh.Trimesh, analysis: AnalysisResult, contacts: list[Conta
     _check_model_mesh(mesh, issues)
     _check_tree(tree, params, issues)
     _check_model_feet(mesh, tree, params, issues)
-    _check_spacing(contacts, params, issues)
+    _check_spacing([c for c in contacts if c.id not in getattr(tree, "patch_covered_contacts", {})], params, issues)
     _check_fragile(tree, params, issues)
     anchors = {c.id for c in contacts if not c.manual and c.reason == ContactReason.ISLAND
                and ("island anchor" in c.note)}

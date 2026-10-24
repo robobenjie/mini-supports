@@ -253,10 +253,11 @@ def _generate(mesh, params, manual_contacts, progress, analysis, contacts) -> Ge
             tree.braces = list(getattr(tree, "_raft_split_original_braces", tree.braces))
             support_mesh = _build.mesh_tree(tree, params, progress.sub(.96, .97) if auto_split else progress.sub(.92, .94))
             raft_mesh = _build.mesh_raft(tree, params) if params.raft_enabled else None
-    from .patch_release import release_patches, divide_large_raft
+    from .patch_release import release_patches, divide_large_raft, remove_unused_raft_parts
     support_mesh = release_patches(mesh, active, tree, support_mesh, raft_mesh, requested_params, progress.sub(.96, .98))
     raft_mesh = getattr(tree, "release_raft_mesh", raft_mesh)
     raft_mesh, support_mesh, tree.raft_size_report = divide_large_raft(raft_mesh, support_mesh, requested_params)
+    raft_mesh, tree.raft_cleanup_report = remove_unused_raft_parts(raft_mesh, support_mesh, mesh, requested_params)
     timings["mesh"] = time.perf_counter() - t
 
     t = time.perf_counter()
@@ -265,6 +266,7 @@ def _generate(mesh, params, manual_contacts, progress, analysis, contacts) -> Ge
     stats = _verify.support_stats(mesh, contacts, tree, support_mesh, raft_mesh, issues, params)
     stats["patch_release"] = getattr(tree, "patch_release_report", [])
     stats["raft_size_split"] = getattr(tree, "raft_size_report", {})
+    stats["raft_cleanup"] = tree.raft_cleanup_report
     if auto_split:
         stats["upward_removal"] = tree.upward_removal_report
     if params.underside_patches:

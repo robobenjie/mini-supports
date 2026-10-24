@@ -286,3 +286,41 @@ def divide_large_raft(raft_mesh, support_mesh, params):
         status='applied' if any(r['status']=='applied' for r in reports) else 'skipped',
         thresholdMm=params.raft_max_span,slots=sum(r['status']=='applied' for r in reports),
         protectedRootBridges=False,paths=reports)
+
+
+def remove_unused_raft_parts(raft_mesh, support_mesh, model_mesh, params):
+    """Discard whole detached pad pieces with nothing resting on them.
+
+    Inspect the final geometry after all slots/notches, at the raft's top.
+    A high branch merely passing above an empty island does not need that pad.
+    Preserve pads carrying the model itself across its intentional raft gap.
+    Connected margin remains part of its load-bearing pad.
+    """
+    from .params import model_on_raft
+    if raft_mesh is None or not len(raft_mesh.faces):
+        return raft_mesh, dict(status="absent", removedParts=0)
+    raft = trimesh_to_manifold(raft_mesh)
+    if raft.status() != mf.Error.NoError:
+        return raft_mesh, dict(status="skipped", reason="Raft solid unavailable", removedParts=0)
+    top = float(raft.bounding_box()[5])
+    epsilon = min(.01, params.layer_height / 10)
+    bearing = mf.CrossSection()
+    if support_mesh is not None and len(support_mesh.faces):
+        support = trimesh_to_manifold(support_mesh)
+        if support.status() != mf.Error.NoError:
+            return raft_mesh, dict(status="skipped", reason="Support solid unavailable", removedParts=0)
+        bearing = support.slice(top + epsilon)
+    if model_on_raft(params):
+        model = trimesh_to_manifold(model_mesh)
+        if model.status() != mf.Error.NoError:
+            return raft_mesh, dict(status="skipped", reason="Model solid unavailable", removedParts=0)
+        bearing = bearing + model.slice(top + params.raft_release_gap + epsilon)
+    parts = raft.decompose()
+    retained, removed = [], []
+    for part in parts:
+        (retained if (part.project() ^ bearing).area() > 1e-8 else removed).append(part)
+    report = dict(status="applied" if removed else "unchanged", removedParts=len(removed),
+                  retainedParts=len(retained), removedVolumeMm3=sum(p.volume() for p in removed))
+    if not removed:
+        return raft_mesh, report
+    return (manifold_to_trimesh(mf.Manifold.compose(retained)) if retained else None), report

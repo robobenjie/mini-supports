@@ -472,6 +472,38 @@ def test_large_raft_notches_an_unavoidable_wide_root():
  assert report['paths'][0]['depthMm']>.7+.3
 
 
+def test_raft_cleanup_removes_empty_islands_but_keeps_real_support_and_model_bases():
+ import manifold3d as mf
+ from arbor.engine.patch_release import remove_unused_raft_parts
+ pads=[mf.Manifold.cube([3,3,.7]).translate([x-1.5,-1.5,-.7]) for x in (0,5,10)]
+ raft=mf.Manifold.compose(pads)
+ # A tall branch over the middle pad does not grow out of it.
+ support=mf.Manifold.cylinder(5,.4,.4,24)+mf.Manifold.cube([8,.6,.6]).translate([0,-.3,4])
+ model=trimesh.creation.box([2,2,1]);model.apply_translation([10,0,.62])
+ result,report=remove_unused_raft_parts(manifold_to_trimesh(raft),manifold_to_trimesh(support),model,
+                                      params(raft_enabled=True,raft_coverage='footprint'))
+ assert report['removedParts']==1 and report['retainedParts']==2
+ kept=trimesh_to_manifold(result)
+ assert abs(kept.volume()-12.6)<1e-5 and len(kept.decompose())==2
+ assert all(abs((kept^p).volume()-p.volume())<1e-6 for p in (pads[0],pads[2]))
+ # A continuous pad keeps its margins; cleanup is not a footprint trim.
+ joined=mf.Manifold.cube([13,3,.7]).translate([-1.5,-1.5,-.7])
+ original=manifold_to_trimesh(joined)
+ result,report=remove_unused_raft_parts(original,manifold_to_trimesh(support),model,params(raft_enabled=True))
+ assert result is original and report['removedParts']==0
+
+
+def test_raft_cleanup_handles_empty_supports_and_lifted_models():
+ import manifold3d as mf
+ from arbor.engine.patch_release import remove_unused_raft_parts
+ raft=manifold_to_trimesh(mf.Manifold.cube([4,4,.7]).translate([-2,-2,-.7]))
+ model=trimesh.creation.box([2,2,1]);model.apply_translation([0,0,5])
+ result,report=remove_unused_raft_parts(raft,None,model,params(raft_enabled=True,raft_coverage='footprint'))
+ assert result is None and report['removedParts']==1
+ result,report=remove_unused_raft_parts(None,None,model,params())
+ assert result is None and report['status']=='absent'
+
+
 def test_analysis_repairs_exact_seams_and_only_bounded_pinholes():
  import manifold3d as mf
  from arbor.engine.build import prepare_analysis_mesh
