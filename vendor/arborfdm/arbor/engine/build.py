@@ -76,6 +76,51 @@ def trimesh_to_manifold(t: trimesh.Trimesh) -> mf.Manifold:
     return mf.Manifold(mf.Mesh(vert_properties=v, tri_verts=f))
 
 
+def prepare_analysis_mesh(mesh):
+    """Repair exact seams and sub-nozzle pinholes in the analysis copy only.
+
+    Do not discard narrow triangles: they can close real surfaces. Some exports
+    contain coincident vertex indices and tiny open loops after simplification.
+    Bound every filled loop to 0.1 mm; larger openings remain an explicit error.
+    The caller retains its original mesh for export.
+    """
+    solid = trimesh_to_manifold(mesh)
+    if solid.status() == mf.Error.NoError:
+        return mesh, None
+    from collections import Counter
+    vertices, inverse = np.unique(np.asarray(mesh.vertices, dtype=np.float32), axis=0, return_inverse=True)
+    faces = inverse[mesh.faces]
+    faces = faces[(faces[:, 0] != faces[:, 1]) & (faces[:, 1] != faces[:, 2]) & (faces[:, 2] != faces[:, 0])]
+    edges = Counter((int(a), int(b)) for face in faces for a, b in zip(face, np.roll(face, -1)))
+    remaining = [(a, b) for (a, b), n in edges.items() for _ in range(max(0, n - edges[(b, a)]))]
+    starts = Counter(a for a, _ in remaining)
+    ends = Counter(b for _, b in remaining)
+    added, diameters = [], []
+    # Ambiguous boundary junctions need a real repair tool, not guessed caps.
+    if starts == ends and all(n == 1 for n in starts.values()):
+        following = dict(remaining)
+        while following:
+            first = next(iter(following)); loop = [first]; here = following.pop(first)
+            while here != first:
+                loop.append(here); here = following.pop(here)
+            if not 3 <= len(loop) <= 8:
+                continue
+            xyz = vertices[loop]
+            diameter = float(np.linalg.norm(xyz[:, None] - xyz[None, :], axis=2).max())
+            if diameter <= .1:
+                added.extend([loop[0], loop[i+1], loop[i]] for i in range(1, len(loop)-1))
+                diameters.append(diameter)
+    if added:
+        faces = np.vstack([faces, added])
+    packed = mf.Mesh(np.asarray(vertices, dtype=np.float32), np.asarray(faces, dtype=np.uint32))
+    packed.merge()
+    repaired = mf.Manifold(packed)
+    if repaired.status() != mf.Error.NoError:
+        return mesh, dict(status='unrepaired', reason='Open or inconsistent analysis mesh exceeds bounded seam repair')
+    return manifold_to_trimesh(repaired), dict(status='repaired', exactSeams=True,
+        filledHoleDiametersMm=diameters, scope='Analysis copy only; original export geometry unchanged')
+
+
 def joint_at(p, R: float, below, r_below_at, phi_deg: float, segs: int) -> mf.Manifold:
     """Sphere of radius R at p (junction, ball tip), with its underside made printable.
 
@@ -710,6 +755,7 @@ def tree_solids(tree: SupportTree, params: SupportParams, progress: Optional[Pro
         s_ = cone_between(p0, p1, rb, rb, max(8, segs // 2))
         if s_ is not None:
             out.append(s_)
+    out.extend(getattr(tree, "patch_solids", []))
     return [s_ for s_ in out if s_ is not None]
 
 
@@ -826,6 +872,21 @@ def _tree_groups(tree: SupportTree) -> list[list[int]]:
 MIN_PART_VOLUME = 1e-3   # mm3: separate support fragments below this are dropped
 
 
+def materialize_manifold(solid: mf.Manifold) -> mf.Manifold:
+    """Keep the exact indexed boundary while dropping accumulated Boolean history.
+
+    Split audits compare fragments against the original supports. Retaining the
+    construction history of every patch fan makes those comparisons expensive,
+    especially in WASM. This is the same float32 boundary used by mesh export;
+    it neither simplifies nor welds nearby vertices.
+    """
+    mesh = solid.to_mesh()
+    fresh = mf.Manifold(mf.Mesh(
+        np.array(mesh.vert_properties[:, :3], dtype=np.float32, order="C", copy=True),
+        np.array(mesh.tri_verts, dtype=np.uint32, order="C", copy=True)))
+    return fresh if fresh.status() == mf.Error.NoError else solid
+
+
 def mesh_tree_manifold(tree: SupportTree, params: SupportParams,
                        progress: Optional[Progress] = None) -> mf.Manifold:
     solids = tree_solids(tree, params, progress)
@@ -834,10 +895,34 @@ def mesh_tree_manifold(tree: SupportTree, params: SupportParams,
     if not solids:
         return mf.Manifold()
     union = mf.Manifold.batch_boolean(solids, mf.OpType.Add)
+    keepout = getattr(tree, "tip_keepout", None)
+    if keepout is not None and keepout.status() == mf.Error.NoError:
+        union = union - keepout - keepout.translate([0, 0, -params.z_gap])
+    patch_keepouts = getattr(tree, "patch_contact_keepouts", [])
+    if patch_keepouts:
+        union = union - mf.Manifold.batch_boolean(patch_keepouts, mf.OpType.Add)
     # Tilted tube ends and spheres near the feet can dip below the support base; nothing may
     # exist under it (plate, or raft top which the raft mesh fills).
     z_base = getattr(tree, "z_base", support_base_z(params))
     union = union.trim_by_plane((0.0, 0.0, 1.0), float(z_base))
+    slot = getattr(tree, "_raft_split_slot", None)
+    if params.removal_groups and params.raft_split and slot is not None:
+        union = materialize_manifold(union)
+        original_free = [materialize_manifold(p) for p in union.decompose()
+                         if p.volume() >= MIN_PART_VOLUME and p.bounding_box()[2] > z_base + .01]
+        original_free = mf.Manifold.batch_boolean(original_free, mf.OpType.Add) if original_free else mf.Manifold()
+        cs = mf.CrossSection([np.asarray(slot.exterior.coords)[:-1]], mf.FillRule.EvenOdd)
+        first_tip = min((n.position[2] for n in tree.nodes.values() if n.kind == NodeKind.TIP),
+                        default=z_base)
+        height = max(.001, min(params.foot_height + params.collar_height + .01,
+                               first_tip - z_base - max(.3, 2 * params.layer_height)))
+        cut = mf.Manifold.extrude(cs, height).translate(
+            [0, 0, z_base - .001])
+        union = materialize_manifold(union - cut)
+        tree._release_cut_invalid = any(
+            (p - original_free).volume() > 1e-4
+            for p in union.decompose()
+            if p.volume() >= MIN_PART_VOLUME and p.bounding_box()[2] > z_base + .01)
     # Two solids that almost touch can leave a separate fragment of (near) zero volume after
     # the union; it cannot be printed and would show up as a floating sliver in a slicer.
     parts = union.decompose()

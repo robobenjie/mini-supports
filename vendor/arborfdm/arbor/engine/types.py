@@ -36,19 +36,24 @@ class Contact:
     enabled: bool = True
     rests_on_model: bool = False    # set by the tree builder if its foot stands on the model
     note: str = ""                  # human readable explanation (why it was placed)
+    # Internal routing demand beneath a preplanned patch. Its position is an
+    # actual support-to-support joint, not a point on the sculpture.
+    support_terminal: bool = False
 
     def to_dict(self) -> dict:
         return {"id": self.id, "position": [float(v) for v in self.position],
                 "normal": [float(v) for v in self.normal], "reason": self.reason.value,
                 "manual": self.manual, "tip_diameter": self.tip_diameter,
-                "enabled": self.enabled, "note": self.note}
+                "enabled": self.enabled, "note": self.note,
+                "support_terminal": self.support_terminal}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Contact":
         return cls(id=int(d["id"]), position=np.asarray(d["position"], float),
                    normal=np.asarray(d["normal"], float), reason=ContactReason(d["reason"]),
                    manual=bool(d.get("manual", False)), tip_diameter=d.get("tip_diameter"),
-                   enabled=bool(d.get("enabled", True)), note=d.get("note", ""))
+                   enabled=bool(d.get("enabled", True)), note=d.get("note", ""),
+                   support_terminal=bool(d.get("support_terminal", False)))
 
 
 @dataclass
@@ -94,6 +99,7 @@ class TreeNode:
 @dataclass
 class SupportTree:
     nodes: dict[int, TreeNode] = field(default_factory=dict)
+    support_terminal_ids: set[int] = field(default_factory=set)
 
     def add(self, position, radius, kind, parent=None, contact_id=None) -> TreeNode:
         nid = len(self.nodes)
@@ -121,7 +127,10 @@ class SupportTree:
         kinds = [n.kind for n in self.nodes.values()]
         ch = self.children()
         junctions = sum(1 for i, c in ch.items() if len(c) > 1)
-        return {"tips": kinds.count(NodeKind.TIP),
+        patch_terminals = sum(n.kind == NodeKind.TIP and n.contact_id in self.support_terminal_ids
+                              for n in self.nodes.values())
+        return {"tips": kinds.count(NodeKind.TIP) - patch_terminals,
+                "patch_terminals": patch_terminals,
                 "feet": kinds.count(NodeKind.FOOT),
                 "model_feet": kinds.count(NodeKind.MODEL_FOOT),
                 "trees": len(self.roots()),

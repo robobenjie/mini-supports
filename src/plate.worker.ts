@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 import { DOMParser } from '@xmldom/xmldom';
 import { Plate } from './plate';
+import { SimplifyPool } from './simplify-pool';
 import type { AdditionPlacement, ExportPart, PlateSnapshot } from './plate';
 // Workers do not expose the browser's DOMParser; only tiny XML skeletons use it.
 Object.assign(globalThis, {DOMParser});
@@ -13,7 +14,10 @@ self.onmessage = async (event: MessageEvent<{type:'import';files:File[];placemen
       progress(0,'Reading local files…');
       const inputs = [];
       for (const file of event.data.files) inputs.push({name:file.name,data:await file.arrayBuffer()});
-      const result = await plate.load(inputs,progress,event.data.placement);
+      const pool = new SimplifyPool();
+      let result;
+      try { result = await plate.load(inputs,progress,event.data.placement,pool.simplify); }
+      finally { pool.dispose(); }
       const addition = event.data.placement ? plate.snapshot() : undefined;
       const transfer = new Set(result.minis.flatMap(part=>[part.positions.buffer,...(part.topology?[part.topology.vertices.buffer,part.topology.indices.buffer]:[])]));
       if (addition) for (const source of addition.sources) for (const member of source.members.values()) transfer.add(member.compressed.buffer);

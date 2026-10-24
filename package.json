@@ -4,16 +4,27 @@
   "private": true,
   "type": "module",
   "license": "GPL-3.0-or-later",
+  "homepage": "https://mini-supports.vercel.app",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/robobenjie/mini-supports.git"
+  },
+  "bugs": {
+    "url": "https://github.com/robobenjie/mini-supports/issues"
+  },
   "scripts": {
     "dev": "node scripts/package-source.mjs public && vite --host 127.0.0.1",
     "setup:runtime": "node scripts/setup-runtime.mjs",
     "build": "npm run setup:runtime && tsc --noEmit && vite build && node scripts/package-source.mjs",
     "preview": "vite preview --host 127.0.0.1",
-    "test": "npm run test:import && node --experimental-strip-types scripts/test-engine.mjs && npm run test:plate && npm run test:drag && npm run test:raft-split",
+    "test": "npm run test:sampler && npm run test:import && npm run test:parallel-import && node --experimental-strip-types scripts/test-engine.mjs && npm run test:plate && npm run test:drag && npm run test:raft-split && npm run test:integrated",
+    "test:sampler": "node --experimental-strip-types scripts/test-support-sampler.mjs",
     "test:import": "node --experimental-strip-types scripts/test-import.mjs",
     "test:plate": "node --experimental-strip-types scripts/test-plate.mjs",
     "test:drag": "node --experimental-strip-types scripts/test-drag.mjs",
-    "test:raft-split": "node scripts/test-raft-split.mjs"
+    "test:raft-split": "node scripts/test-raft-split.mjs",
+    "test:integrated": "node scripts/test-integrated-supports.mjs",
+    "test:parallel-import": "node --experimental-strip-types scripts/test-parallel-import.mjs"
   },
   "dependencies": {
     "@fontsource-variable/dm-sans": "5.3.0",

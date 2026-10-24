@@ -6,6 +6,8 @@ async function walk(dir) {
  for (const ent of await readdir(dir, {withFileTypes:true})) {
   if (ent.name === '__pycache__') continue;
   const p = `${dir}/${ent.name}`;
+  // Ship the converter's corresponding source, not local print experiments.
+  if (dir === 'scripts' && /^(experiments$|research[-_]|prepare-four-bikers|layout-four-bikers|check-four-bikers|audit-biker)/.test(ent.name)) continue;
   if (ent.isDirectory()) await walk(p); else files[p] = new Uint8Array(await readFile(p));
  }
 }

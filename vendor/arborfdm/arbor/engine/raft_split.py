@@ -13,6 +13,41 @@ from .params import model_on_raft
 from .types import NodeKind
 
 
+def upward_removal_check(mesh, support_mesh, params, progress=None):
+    """Sample upward model translation against the actual support solid.
+
+    This is a cage heuristic, not an extraction-path guarantee. Small contacts
+    may bend or break away; substantial intervening support triggers a split.
+    Checking the intact design first avoids cutting every underside in half.
+    """
+    from .build import trimesh_to_manifold
+    if support_mesh is None or not len(support_mesh.faces):
+        return dict(needed=False, peakCollisionMm3=0., samples=[])
+    model = trimesh_to_manifold(mesh)
+    supports = trimesh_to_manifold(support_mesh)
+    reach = max(0., support_mesh.bounds[1, 2] - mesh.bounds[0, 2])
+    # Resolve the initial release closely, then sample the entire escape height.
+    lifts = sorted(set(float(v) for v in np.r_[.25, .5, 1., np.linspace(0, reach, 17)[1:]]
+                       if 0 < v <= reach))
+    samples = []
+    threshold = max(.25, 8 * params.line_width ** 3)
+    for i, lift in enumerate(lifts):
+        if progress is not None:
+            progress.update(i / max(1, len(lifts)), "Checking whether supports obstruct upward removal")
+        volume = max(0., float((supports ^ model.translate([0, 0, lift])).volume()))
+        samples.append(dict(liftMm=lift, collisionMm3=volume))
+        # This pass decides whether to rebuild with removal groups. Once an
+        # obstruction exceeds the threshold, later samples cannot change that
+        # decision. Clear models still receive every sample.
+        if volume > threshold:
+            break
+    peak = max((s["collisionMm3"] for s in samples), default=0.)
+    return dict(needed=peak > threshold, peakCollisionMm3=peak,
+                thresholdMm3=threshold, samples=samples,
+                samplesComplete=len(samples) == len(lifts),
+                scope="Sampled straight-up removal; stops at confirmed obstruction; peak is among sampled lifts")
+
+
 def _skip(tree, reason, **details):
     old = getattr(tree, "raft_split_report", {})
     tree.raft_split_report = {**old, **details, "status": "skipped", "reason": reason}
@@ -39,7 +74,30 @@ def _root_ids(tree):
 def same_half(tree, first, second):
     """Whether a brace may link two foot-rooted trees."""
     sides = getattr(tree, "raft_split_root_sides", {})
-    return not sides or sides.get(first) == sides.get(second)
+    if sides:
+        return sides.get(first) == sides.get(second)
+    if getattr(tree, "contact_groups", None):
+        groups = node_removal_groups(tree)
+        return groups.get(first) == groups.get(second)
+    return True
+
+
+def node_removal_groups(tree):
+    children = tree.children()
+    groups = {}
+    def group(nid):
+        if nid not in groups:
+            n = tree.nodes[nid]
+            if n.contact_id in tree.contact_groups:
+                groups[nid] = tree.contact_groups[n.contact_id]
+            elif children[nid]:
+                groups[nid] = group(children[nid][0])
+            else:
+                groups[nid] = -1 if n.position[tree.removal_axis] < tree.removal_center else 1
+        return groups[nid]
+    for nid in tree.nodes:
+        group(nid)
+    return groups
 
 
 def plan_split(tree, params, mesh=None):
@@ -61,8 +119,9 @@ def plan_split(tree, params, mesh=None):
     if not params.raft_enabled:
         return _skip(tree, "Raft is disabled")
     feet = sorted((n for n in tree.nodes.values() if n.kind == NodeKind.FOOT), key=lambda n: n.id)
-    if len(feet) < 4:
-        return _skip(tree, "Fewer than four plate feet; no surrounding cage detected")
+    minimum_feet = 2 if params.removal_groups else 4
+    if len(feet) < minimum_feet:
+        return _skip(tree, f"Fewer than {minimum_feet} plate feet; no useful split detected")
     poly = raft_polygon(tree, params)
     if poly is None or poly.is_empty:
         return _skip(tree, "No raft to split")
@@ -71,6 +130,11 @@ def plan_split(tree, params, mesh=None):
     xy = np.array([n.position[:2] for n in feet], float)
     radii = np.array([max(float(getattr(tree, "foot_radius", {}).get(n.id, params.foot_diameter / 2)),
                          float(n.radius)) for n in feet])
+    if params.removal_groups:
+        # Preserve the shaft and an extrusion-width rim. Wide foot/collar skirts
+        # may be divided with the raft, avoiding a disc bridging an otherwise
+        # valid seam. Final solid connectivity remains authoritative.
+        radii = np.array([n.radius for n in feet])
     bounds = getattr(tree, "model_xy_bounds", None)
     if mesh is not None and len(mesh.vertices):
         centre = np.asarray(mesh.bounds, float).mean(axis=0)[:2]
@@ -82,10 +146,10 @@ def plan_split(tree, params, mesh=None):
         return _skip(tree, "Model outline unavailable for cage detection")
     hull = MultiPoint(xy).convex_hull
     # Strict interior avoids splitting a one-sided row whose hull merely touches centre.
-    if not hull.contains(Point(centre)):
+    if not params.removal_groups and not hull.contains(Point(centre)):
         return _skip(tree, "Feet do not surround the model centre")
     angles = np.sort(np.arctan2(xy[:, 1] - centre[1], xy[:, 0] - centre[0]))
-    if np.max(np.diff(np.r_[angles, angles[0] + 2 * math.pi])) >= math.pi - 1e-6:
+    if not params.removal_groups and np.max(np.diff(np.r_[angles, angles[0] + 2 * math.pi])) >= math.pi - 1e-6:
         return _skip(tree, "Feet occupy only one side of the model")
     rim = max(float(params.line_width), 0.2)
     protected_r = radii + rim
@@ -107,7 +171,8 @@ def plan_split(tree, params, mesh=None):
     best = None
     examined = 0
     rejected = {"foot_clearance": 0, "foot_balance": 0, "foundation": 0,
-                "component_count": 0, "area_balance": 0, "anchor_width": 0}
+                "component_count": 0, "area_balance": 0, "anchor_width": 0,
+                "stability_brace": 0}
 
     def consider(path, normal, angle, offset, style):
         nonlocal examined, best
@@ -134,7 +199,7 @@ def plan_split(tree, params, mesh=None):
             covered = half.buffer(1e-8)
             members = [i for i, disc in enumerate(obstacles[:len(feet)]) if covered.covers(disc)]
             counts.append(len(members))
-            if len(members) < max(2, math.ceil(0.2 * len(feet))):
+            if len(members) < max(1 if params.removal_groups else 2, math.ceil(0.2 * len(feet))):
                 rejected["foot_balance"] += 1
                 return
             sides[members] = side
@@ -147,6 +212,13 @@ def plan_split(tree, params, mesh=None):
             widths.append(width)
         if np.any(sides == 0):
             rejected["foot_clearance"] += 1
+            return
+        assigned = {n.id: int(side) for n, side in zip(feet, sides)}
+        if any(assigned.get(a) != assigned.get(b)
+               for a, b, _ in getattr(tree, "_stability_braces", [])):
+            # A motion brace is structural, not an optional link between trees.
+            # Splitting off its foot creates a useless removable raft island.
+            rejected["stability_brace"] += 1
             return
         # Entire rooted trees remain unchanged. Prefer fewer that reach over the
         # opposite raft half, but the final solid connectivity gate is authoritative.
@@ -257,6 +329,9 @@ def finalize_split(tree, params, support_mesh, raft_mesh):
     report = getattr(tree, "raft_split_report", {})
     if report.get("status") != "planned":
         return True
+    if getattr(tree, "_release_cut_invalid", False):
+        _skip(tree, "Release slit would detach a branch from its foundation", connectivity="new_floating_fragment")
+        return False
     from .build import trimesh_to_manifold
     try:
         raft = trimesh_to_manifold(raft_mesh)

@@ -102,6 +102,17 @@ async function pack(name) {
  for(let i=0;i<minis.length;i++)py.FS.writeFile(`/plate-${i}.3mf`,minis[i].result.output);
  py.globals.set('manifest',JSON.stringify({name,parts:minis.map(mini=>({lift:-mini.result.summary.plateZ}))}));
  await py.runPythonAsync('browser_engine.combine(manifest)');
+ await py.runPythonAsync(`
+import zipfile, xml.etree.ElementTree as ET
+with zipfile.ZipFile('/plate.3mf') as archive:
+    config = ET.fromstring(archive.read('Metadata/model_settings.config'))
+    objects = config.findall('object')
+    assert len(objects) == 2
+    assert len({o.get('id') for o in objects}) == 2
+    for obj in objects:
+        assert any(m.get('key') == 'bottom_shell_layers' and m.get('value') == '6'
+                   for part in obj.findall('part') for m in part.findall('metadata')), 'Model skin settings lost during combine'
+`);
  return py.FS.readFile('/plate.3mf').slice();
 }
 await generateMini(0);await generateMini(1);

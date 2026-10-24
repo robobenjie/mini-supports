@@ -1,5 +1,7 @@
 # Mini Supports
 
+[Use the app](https://mini-supports.vercel.app) · [Source on GitHub](https://github.com/robobenjie/mini-supports)
+
 A browser application for **STL / arranged 3MF → ArborFDM tree supports → multipart 3MF**.
 Designed for static hosting on Vercel. Geometry generation runs entirely on the
 user's device in Web Workers. There are no upload endpoints, server functions,
@@ -133,7 +135,8 @@ Import this repository in Vercel, using the included `vercel.json`:
 The build fetches the pinned Pyodide scientific packages and bundles them as
 static assets. No cross-origin isolation headers are needed; computation is
 single-threaded within each dedicated worker; parallelism is between independent minis. `npm run build` includes the
-corresponding source archive linked in the app. Keep that archive and license
+corresponding source archive at `/mini-supports-source.zip`; the app's Source link
+opens this GitHub repository. Keep that archive and license
 available when distributing the app. A Vercel deployment is not automatically
 created by these local scripts.
 
@@ -162,8 +165,10 @@ created by these local scripts.
 - `scripts/test-engine.mjs`: executes the actual WASM path under Node, exercises
   transforms/booleans/slicing, generates supports, and validates 3MF parts.
 
-The original five-stage pipeline is retained: layer/face analysis → contact
-placement → collision-aware tree routing → manifold union → verification.
+The current 0.2 mm pipeline performs layer/face analysis, plans underside patches
+and point contacts, routes collision-aware trees to support both, builds the
+support solids and split rafts, and verifies the geometry. The targeted patches,
+breakaway grips, tapered bases, and braces incorporate physical print feedback.
 Python's NumPy/SciPy/Shapely run in Pyodide; the official Manifold WASM library
 handles solid geometry through the binding adapter. This avoids a partial
 TypeScript reimplementation of the original engine.
@@ -182,8 +187,9 @@ TypeScript reimplementation of the original engine.
 - No manual contacts, orientation search, mesh repair, project saving,
   hollow supports UI, or printer-specific slicing/G-code generation.
 - Preview triangle coordinates are float32. Original winding is preserved.
-- Profiles and geometric verification come from upstream; this browser adaptation
-  has not been physically print-tested. Review warnings and slicer layers.
+- The 0.2 mm profiles incorporate physical print tests on a Bambu A1 with PLA;
+  the 0.4 mm profiles retain the original tree settings. Results vary with model,
+  orientation, material, and slicer settings. Review warnings and slicer layers.
   Reported geometry issues stay visible without blocking the completed 3MF download.
 - 3MF uses Core components with direct Production-extension mesh references and
   globally unique IDs for Bambu Studio compatibility. Nested source assemblies
@@ -277,5 +283,6 @@ benchmark imports include local fixture preparation.
 ## License
 
 GPL-3.0-or-later. Based on [ArborFDM](https://github.com/moshinette/arborfdm).
-See `NOTICE.md`, `LICENSE`, and the retained upstream notices. Source is served at
-`/mini-supports-source.zip` in production builds.
+See `NOTICE.md`, `LICENSE`, and the retained upstream notices. Browse the source
+on [GitHub](https://github.com/robobenjie/mini-supports). Each production build also
+serves its corresponding source at `/mini-supports-source.zip`.

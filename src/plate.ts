@@ -1,7 +1,8 @@
-import { Box3, Matrix4, Vector3 } from 'three';
+import { Box3, BufferAttribute, BufferGeometry, Matrix4, Vector3 } from 'three';
 import { strFromU8 } from 'fflate';
-import { importModels, parse3MF, type ImportedModel, type SourceReference, type SourcePackage } from './model-import.ts';
-import { simplifyMesh, simplifierReady, type IndexedMesh } from './simplify.ts';
+import { importModels, parse3MFAsync, type AsyncSimplifier, type ImportedModel, type SourceReference, type SourcePackage } from './model-import.ts';
+import { indexSTL, simplifyMesh, simplifierReady, type IndexedMesh } from './simplify.ts';
+import { mapImportFiles } from './simplify-pool.ts';
 import { ZipArchive, textMembers, packMembers, type ZipMember } from './zip-archive.ts';
 import { placeNearby, type Footprint } from './placement.ts';
 const CORE = 'http://schemas.microsoft.com/3dmanufacturing/core/2015/02';
@@ -26,15 +27,24 @@ export interface AdditionPlacement { occupied: Footprint[] }
 export class Plate {
   sources: SourcePackage[] = [];
   parts: OriginalPart[] = [];
-  async load(inputs: {name: string; data: ArrayBuffer}[], progress: (f: number, text: string) => void, placement?: AdditionPlacement): Promise<PreparedPlate> {
-    await simplifierReady;
+  async load(inputs: {name: string; data: ArrayBuffer}[], progress: (f: number, text: string) => void, placement?: AdditionPlacement, simplify?: AsyncSimplifier): Promise<PreparedPlate> {
+    if (!simplify) {
+      await simplifierReady;
+      simplify = async (mesh, unit = 1) => simplifyMesh(mesh instanceof Float32Array ? indexSTL(mesh) : mesh, unit);
+    }
+    const simplifyImport = simplify;
     const minis: PreviewPart[] = [], sources: SourcePackage[] = [], parts: OriginalPart[] = [];
     let partCount = 0, skippedItems = 0, has3mf = false;
     const occupied = [...(placement?.occupied ?? [])];
     const bounds = new Box3();
-    for (const [fileIndex, input] of inputs.entries()) {
+    const fractions = inputs.map(() => 0);
+    const importedInputs = await mapImportFiles(inputs, async (input, fileIndex) => {
+      const report = (fraction: number, message: string) => {
+        fractions[fileIndex] = Math.max(fractions[fileIndex], fraction);
+        progress(fractions.reduce((sum, value) => sum + value, 0) / inputs.length * .95, message);
+      };
       let imported: ImportedModel;
-      if (/\.3mf$/i.test(input.name)) imported = parse3MF(input.data, { simplify: simplifyMesh, progress: (f,s) => progress((fileIndex + f) / inputs.length, s) });
+      if (/\.3mf$/i.test(input.name)) imported = await parse3MFAsync(input.data, simplifyImport, report);
       else {
         imported = importModels([input]);
         const vertices = imported.geometry.getAttribute('position').array;
@@ -46,7 +56,24 @@ export class Plate {
         const members = textMembers({'3D/stl.model': model(xml)});
         imported.source = {archive: new ZipArchive(packMembers(members)), references: new Map([['3D/stl.model', new Map()]]), objectIds: new Map([['3D/stl.model', ['1']]])};
         imported.minis[0].sources = [{ path: '3D/stl.model', objectId: '1', transform: new Matrix4().toArray(), unit: 1 }];
+        // Keep the original above for export; only preview/support analysis uses
+        // the same error-bounded simplification already used for 3MF inputs.
+        report(.25, 'Simplifying meshes for support placement');
+        const triangles = vertices.length / 9;
+        const topology = await simplifyImport(vertices as Float32Array);
+        const positions = new Float32Array(topology.indices.length * 3);
+        for (let i = 0; i < topology.indices.length; i++) positions.set(topology.vertices.subarray(topology.indices[i]*3, topology.indices[i]*3+3), i*3);
+        const geometry = new BufferGeometry().setAttribute('position', new BufferAttribute(positions, 3));
+        imported.minis[0].geometry.dispose(); imported.geometry.dispose();
+        imported.minis[0].geometry = geometry;
+        imported.minis[0].triangles = triangles;
+        imported.minis[0].topology = topology;
+        imported.geometry = geometry;
       }
+      report(1, 'Arranging models…');
+      return imported;
+    });
+    for (const imported of importedInputs) {
       imported.geometry.computeBoundingBox(); const box = imported.geometry.boundingBox!;
       const size = box.getSize(new Vector3()), footprint = placeNearby(size.x,size.y,occupied);
       // A 3MF is placed as one unit, keeping its internal arrangement intact.
@@ -92,7 +119,7 @@ export class Plate {
   }
   export(parts: ExportPart[], progress: (f: number, text: string) => void): Uint8Array {
     if (parts.length !== this.parts.length) throw new Error('The imported plate changed. Regenerate supports.');
-    const members: ZipMember[] = [], resources: string[] = [], build: string[] = [], paths: string[] = [];
+    const members: ZipMember[] = [], resources: string[] = [], build: string[] = [], paths: string[] = [], configs: string[] = [];
     // Studio's sub-model reader ignores cross-file component paths, and its mesh
     // cache uses object IDs without file paths. Reference original mesh leaves
     // directly from the root and assign IDs that are unique across the package.
@@ -135,16 +162,24 @@ export class Plate {
       if(supportObjects.length){members.push(...textMembers({[path]:model(supportObjects.join(''))}));paths.push(path)}
       const original = this.parts[i], delta = new Matrix4().fromArray(part.transform);
       let components = '';
+      const partConfigs: string[] = [];
+      const configPath = 'Metadata/model_settings.config';
+      const generatedConfig = generated.members.has(configPath) ? new DOMParser().parseFromString(strFromU8(generated.read(configPath)), 'application/xml') : undefined;
+      const thickSkin = generatedConfig && Array.from(generatedConfig.getElementsByTagName('metadata')).some(m => m.getAttribute('key') === 'bottom_shell_layers' && m.getAttribute('value') === '6');
+      const layerHeight = generatedConfig && Array.from(generatedConfig.getElementsByTagName('metadata')).find(m => m.getAttribute('key') === 'layer_height')?.getAttribute('value');
       for(const ref of original.references){
         const file=files.get(`${original.source}/${ref.path}`)!;
         const originalMatrix=delta.clone().multiply(new Matrix4().fromArray(ref.transform));
         // A reference inherits its resource file's units; the matrix carries only placement.
         originalMatrix.multiply(new Matrix4().makeScale(1/ref.unit,1/ref.unit,1/ref.unit));
+        partConfigs.push(`<part id="${file.ids.get(ref.objectId)}" subtype="normal_part"><metadata key="name" value="${escape(part.name)}"/>${thickSkin ? '<metadata key="bottom_shell_layers" value="6"/><metadata key="bottom_shell_thickness" value="0"/>' : ''}</part>`);
         components+=`<component objectid="${file.ids.get(ref.objectId)}" p:path="/${escape(file.name)}" transform="${transform(originalMatrix)}"/>`;
       }
       const shift = part.supportOffset ?? [0,0,0];
       for (const id of supportIds.values()) components += `<component objectid="${id}" p:path="/${path}" transform="1 0 0 0 1 0 0 0 1 ${shift.join(' ')}"/>`;
+      for (const id of supportIds.values()) partConfigs.push(`<part id="${id}" subtype="normal_part"><metadata key="name" value="Supports"/>${thickSkin ? '<metadata key="bottom_shell_layers" value="3"/><metadata key="bottom_shell_thickness" value="0"/>' : ''}</part>`);
       const assemblyId=allocate();
+      configs.push(`<object id="${assemblyId}"><metadata key="name" value="${escape(part.name)}"/><metadata key="enable_support" value="0"/>${layerHeight ? `<metadata key="layer_height" value="${escape(layerHeight)}"/>` : ''}${partConfigs.join('')}</object>`);
       resources.push(`<object id="${assemblyId}" type="model" name="${escape(part.name)}"><components>${components}</components></object>`);
       build.push(`<item objectid="${assemblyId}" transform="1 0 0 0 1 0 0 0 1 0 0 ${part.lift}"/>`);
       // The generated model and support geometry already share the same working frame.
@@ -154,7 +189,8 @@ export class Plate {
     const items = build.map(item=>item.replace('1 0 0 0 1 0 0 0 1 0 0 ',`1 0 0 0 1 0 0 0 1 ${x} ${y} `)).join('');
     const main = '3D/3dmodel.model';
     members.push(...textMembers({
-      '[Content_Types].xml': '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/></Types>',
+      '[Content_Types].xml': '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/><Default Extension="config" ContentType="application/xml"/></Types>',
+      'Metadata/model_settings.config': `<config>${configs.join('')}</config>`,
       '_rels/.rels': rels([main]), '3D/_rels/3dmodel.model.rels': rels(paths), [main]: model(resources.join(''), items),
     }));
     progress(.9,'Assembling download with original mesh detail');

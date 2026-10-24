@@ -5,7 +5,7 @@ transforms, method names, and ownership between the two official bindings.
 """
 import numpy as np
 from pyodide.ffi import to_js
-from js import Object, Float32Array, Uint32Array
+from js import Object
 from manifold_js import api as _api
 
 class Error:
@@ -38,8 +38,10 @@ class Mesh:
         else:
             self._obj = _api.Mesh.new(_js({
                 'numProp': 3,
-                'vertProperties': Float32Array.new(_js(np.asarray(vert_properties).ravel())),
-                'triVerts': Uint32Array.new(_js(np.asarray(tri_verts).ravel())),
+                # Pyodide converts contiguous buffers directly to typed arrays.
+                # Avoid millions of Python floats/ints and a second JS copy.
+                'vertProperties': to_js(np.ascontiguousarray(vert_properties, dtype=np.float32).ravel()),
+                'triVerts': to_js(np.ascontiguousarray(tri_verts, dtype=np.uint32).ravel()),
             }))
     @property
     def vert_properties(self):
@@ -95,7 +97,14 @@ class Manifold(_Solid):
     def status(self): return getattr(self, '_error', None) or self._obj.status()
     def volume(self): return self._obj.volume()
     def to_mesh(self): return Mesh(_obj=self._obj.getMesh())
+    def as_original(self): return self._wrap(self._obj.asOriginal())
+    def project(self): return CrossSection._wrap(self._obj.project())
+    def bounding_box(self):
+        box = self._obj.boundingBox()
+        return tuple(box.min.to_py()) + tuple(box.max.to_py())
     def slice(self, height): return CrossSection._wrap(self._obj.slice(float(height)))
+    def ray_cast(self, origin, endpoint):
+        return self._obj.rayCast(_js(origin), _js(endpoint)).to_py()
     def translate(self, xyz): return self._wrap(self._obj.translate(_js(xyz)))
     def rotate(self, xyz): return self._wrap(self._obj.rotate(_js(xyz)))
     def transform(self, matrix):

@@ -531,6 +531,8 @@ def export_3mf(path: str | Path, model: trimesh.Trimesh, supports: Optional[trim
             out.write(f'<component objectid="{i}"/>')
         out.write("</components></object>\n")
         items = [pid]
+        cfg = [(pid, model_name + " assembly", "assembly",
+                [(oid, oname, role) for oid, oname, role, _ in cfg])]
     out.write("</resources>\n<build>\n")
     tr = format_3mf_matrix(tmat)
     for i in items:
@@ -539,7 +541,7 @@ def export_3mf(path: str | Path, model: trimesh.Trimesh, supports: Optional[trim
 
     extra_files: dict[str, bytes] = {}
     light = layout == "separate" and bool(getattr(params, "light_slicer_supports", False))
-    assembly = any(role == "assembly" for _n, role, _m in groups)
+    assembly = layout == "components" or any(role == "assembly" for _n, role, _m in groups)
     sup_extra: dict[str, str] = {}
     if light and (assembly or any(role == "supports" for _n, role, _m in groups)):
         sup_extra = _check_object_settings(LIGHT_SUPPORT_SETTINGS)
@@ -555,9 +557,14 @@ def export_3mf(path: str | Path, model: trimesh.Trimesh, supports: Optional[trim
         lh = {}
     if lh or extra or sup_extra or assembly:
         def part_settings(role):
-            return sup_extra if role in ("supports", "raft") else {}
+            if role in ("supports", "raft"):
+                return {**sup_extra, **({"bottom_shell_layers": "3", "bottom_shell_thickness": "0"}
+                        if getattr(params, "patch_release", False) else {})}
+            if role == "model" and getattr(params, "patch_release", False):
+                return {"bottom_shell_layers": "6", "bottom_shell_thickness": "0"}
+            return {}
         extra_files[BBS_MODEL_CONFIG] = _model_settings_config(
-            [(oid, oname, lh.get(role), part_settings(role) if role != "assembly" else {},
+            [(oid, oname, (params.layer_height if role == "assembly" and getattr(params, "patch_release", False) else lh.get(role)), part_settings(role) if role != "assembly" else {},
               [(pid, pn, part_settings(pr)) for pid, pn, pr in parts])
              for oid, oname, role, parts in cfg],
             extra)

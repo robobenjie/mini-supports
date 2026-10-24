@@ -60,6 +60,23 @@ class SupportParams:
     tip_shape: str = "cone"               # "cone" | "ball"
     z_gap: float = 0.0                    # extra vertical clearance (subtracted from tip)
     xy_clearance: float = 0.8             # min horizontal clearance of branches from the model
+    underside_patches: bool = False      # conformal underside roofs on resin-style branches
+    patch_slope_deg: float = 60.0        # stop at steep sides; no fixed XY patch-size limit
+    patch_mode: str = "region"          # region or experimental startup basins
+    patch_start_fraction: float = 0.30  # low portion of each local underside basin
+    patch_start_rise_mm: float = 0.0    # >0 selects by rise above each minimum, replacing the fraction
+    patch_gap: float = 0.12              # separate from point-tip clearance
+    patch_roof_thickness: float = 0.18
+    patch_grid: bool = False             # experimental independently fanned peel panels
+    patch_grid_threshold: float = 7.5    # divide footprints exceeding this XY span
+    patch_grid_pitch: float = 5.0
+    patch_grid_gap: float = 0.24         # actual gap is at least one extrusion width
+    patch_grip_length: float = 0.0       # sleeve existing branch below a roof; zero disables
+    patch_grip_diameter: float = 1.6
+    patch_release: bool = False          # separated conformal ribbons on breakaway necks
+    patch_release_width: float = 2.4
+    patch_release_grip_length: float = 1.6
+    raft_max_span: float = 12.7           # slot larger pads, preserving support roots
 
     # --- branches / trunks --------------------------------------------------
     branch_min_diameter: float = 1.0
@@ -74,6 +91,8 @@ class SupportParams:
     short_contact_preferred_width: float = 0.0  # optional wider root/projected cap; fall back to line_width
     trunk_diameter: float = 2.6
     trunk_growth_per_mm: float = 0.02     # diameter growth per mm descended
+    fdm_stability: bool = False          # gradual taper; avoid forcing short merges to trunk size
+    removal_groups: bool = False         # keep opposite contact groups from merging/bracing
     min_tree_distance: float = 1.5
     walls: int = 3                        # informational: perimeters advised in slicer
 
@@ -95,6 +114,7 @@ class SupportParams:
     raft_thickness: float = 0.8
     raft_margin: float = 2.0
     raft_split: bool = False            # heuristic removal slot for surrounding support cages
+    raft_split_auto: bool = True        # retain a continuous pad when lifting up appears clear
     raft_split_gap: float = 0.6         # actual slot is at least two line widths
     # raft_coverage (docs/ALGORITHM.md, "Raft"):
     #   "feet"      raft under the feet only (hulls of the foot clusters, minus the model
@@ -166,13 +186,14 @@ class SupportParams:
                     "branch_min_diameter", "branch_max_diameter", "segment_length",
                     "trunk_diameter", "foot_diameter", "collar_diameter", "on_model_tip_diameter",
                     "brace_diameter", "brace_spacing_z", "brace_max_length", "raft_split_gap")
+        positive += ("patch_roof_thickness", "patch_grid_threshold", "patch_grid_pitch", "patch_grid_gap", "patch_grip_diameter", "patch_release_width", "patch_release_grip_length")
         for name in positive:
             if getattr(self, name) <= 0:
                 p.append(f"{name} must be > 0")
         non_negative = ("merge_distance", "min_region_area", "tip_penetration", "z_gap", "xy_clearance", "model_neck_clearance",
                         "trunk_growth_per_mm", "min_tree_distance", "foot_height", "collar_height",
                         "brace_min_height", "raft_margin", "raft_lift", "raft_release_gap",
-                        "short_contact_preferred_width")
+                        "short_contact_preferred_width", "patch_gap", "patch_grip_length", "raft_max_span")
         for name in non_negative:
             if getattr(self, name) < 0:
                 p.append(f"{name} must be >= 0")
@@ -194,6 +215,16 @@ class SupportParams:
             p.append("layer_height must be in [0.02, 0.8 x nozzle]")
         if not 10 <= self.overhang_angle_deg <= 89:
             p.append("overhang_angle_deg out of range [10, 89]")
+        if not 10 <= self.patch_slope_deg <= 75:
+            p.append("patch_slope_deg out of range [10, 75]")
+        if self.patch_grid_gap >= self.patch_grid_pitch:
+            p.append("patch_grid_gap must be smaller than patch_grid_pitch")
+        if self.patch_mode not in ("region", "startup"):
+            p.append("patch_mode must be region or startup")
+        if not .1 <= self.patch_start_fraction <= .75:
+            p.append("patch_start_fraction out of range [0.1, 0.75]")
+        if not 0 <= self.patch_start_rise_mm <= 100:
+            p.append("patch_start_rise_mm out of range [0, 100]")
         if self.tip_diameter < 0.5 * self.nozzle_diameter:
             p.append("tip_diameter below half the nozzle diameter is not printable")
         if self.island_anchor_height < 0:

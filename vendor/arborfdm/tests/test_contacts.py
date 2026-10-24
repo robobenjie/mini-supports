@@ -17,6 +17,30 @@ from arbor.engine.types import Cancelled, Contact, ContactReason, Progress
 P = SupportParams()
 
 
+def test_optional_caster_accelerator_failure_uses_reference(monkeypatch):
+    from arbor.engine.contacts import VerticalCaster
+    mesh = trimesh.creation.box()
+    points = np.array([[0., 0., -2.], [2., 2., -2.]])
+    expected = VerticalCaster(mesh).cast(points)
+    calls = []
+
+    class BrokenCaster:
+        def __init__(self, model, reference):
+            assert model is mesh and len(reference.fid)
+
+        def cast(self, pts, tol):
+            calls.append(len(pts))
+            raise RuntimeError("Worker bridge unavailable")
+
+    monkeypatch.setattr(VerticalCaster, "accelerator", BrokenCaster)
+    caster = VerticalCaster(mesh)
+    for _ in range(2):
+        actual = caster.cast(points)
+        np.testing.assert_allclose(actual[0], expected[0], equal_nan=True)
+        np.testing.assert_array_equal(actual[1], expected[1])
+    assert calls == [2]
+
+
 def box(ext, center):
     b = trimesh.creation.box(extents=ext)
     b.apply_translation(center)

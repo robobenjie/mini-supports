@@ -2,6 +2,7 @@
 import Module from 'manifold-3d';
 import type { PyodideInterface } from 'pyodide';
 import type { WorkerRequest, WorkerReply } from './types';
+import { createSupportSamplerBridge } from './support-sampler';
 const scope = self as DedicatedWorkerGlobalScope;
 const send = (data: WorkerReply) => scope.postMessage(data);
 const progress = (fraction: number, message: string) => send({type:'progress', fraction, message});
@@ -16,6 +17,7 @@ async function boot() {
   manifold.setup();
   const py: PyodideInterface = await loadPyodide({indexURL:base});
   py.registerJsModule('manifold_js', {api:manifold});
+  py.registerJsModule('support_sampler_js', createSupportSamplerBridge());
   py.registerJsModule('browser_bridge', {progress});
   progress(0, 'Loading geometry packages (first run takes a moment)…');
   await py.loadPackage(['numpy','scipy','shapely']);

@@ -33,7 +33,7 @@ export class Mini {
     if(this.topology)for(let i=0;i<this.topology.vertices.length;i+=3){this.topology.vertices[i]-=center.x;this.topology.vertices[i+1]-=center.y;this.topology.vertices[i+2]-=center.z}
     this.originalTriangles = imported.triangles ?? imported.geometry.getAttribute('position').count / 3;
     imported.geometry.translate(-center.x, -center.y, -center.z);
-    this.model = new Mesh(imported.geometry, new MeshStandardMaterial({ color: 0xd5d0bf, roughness: .64, metalness: .12 }));
+    this.model = new Mesh(imported.geometry, new MeshStandardMaterial({ color: 0xa8aeb3, roughness: .64, metalness: .12 }));
     this.model.position.copy(center); this.position.copy(center); this.root.add(this.model);
     this.model.userData.miniId = id;
   }
@@ -97,8 +97,8 @@ export class Mini {
     this.supportOffset.set(0, 0, 0);
     this.remove(this.supports); this.remove(this.raft); this.supports = this.raft = undefined;
     const loader = new STLLoader();
-    if (result.supports) this.supports = new Mesh(loader.parse(result.supports.slice().buffer), new MeshStandardMaterial({ color: 0xb2e88f, roughness: .52, metalness: .08 }));
-    if (result.raft) this.raft = new Mesh(loader.parse(result.raft.slice().buffer), new MeshStandardMaterial({ color: 0x658761, roughness: .8 }));
+    if (result.supports) this.supports = new Mesh(loader.parse(result.supports.slice().buffer), new MeshStandardMaterial({ color: 0xc34a16, roughness: .52, metalness: .08 }));
+    if (result.raft) this.raft = new Mesh(loader.parse(result.raft.slice().buffer), new MeshStandardMaterial({ color: 0x987059, roughness: .8 }));
     if (this.supports) this.root.add(this.supports);
     if (this.raft) this.root.add(this.raft);
     this.result = result;

@@ -79,8 +79,9 @@ PLA_DENSITY = 1.24        # g/cm3, for the mass estimate in support_stats
 
 
 def _routed_contact_ids(tree: SupportTree) -> set[int]:
+    terminals = getattr(tree, "support_terminal_ids", set())
     return {n.contact_id for n in tree.nodes.values()
-            if n.kind == NodeKind.TIP and n.contact_id is not None}
+            if n.kind == NodeKind.TIP and n.contact_id is not None and n.contact_id not in terminals}
 
 
 def _root_of(tree: SupportTree):
@@ -277,9 +278,13 @@ def _check_mesh(mesh, support_mesh, tree, contacts, params, issues, support_man=
         comps = support_mesh.split(only_watertight=False)
     except Exception:
         comps = [support_mesh]
+    from .build import MIN_PART_VOLUME
     for comp in comps:
-        if comp.is_watertight and comp.volume < 0:
-            continue  # inverted shell = closed void inside a solid trunk, not a separate part
+        if comp.is_watertight and comp.volume < MIN_PART_VOLUME:
+            # Ignore closed voids and numerical residue using the same cutoff
+            # as mesh_tree_manifold. Float32 conversion can split a virtually
+            # zero-volume shell off an otherwise connected Boolean result.
+            continue
         lo, hi = comp.bounds
         if lo[2] <= z_base + PLATE_EPS:
             continue
@@ -673,10 +678,12 @@ def _subtree_info(tree: SupportTree):
             stack.append(c)
     ztop: dict[int, float] = {}
     cid: dict[int, Optional[int]] = {}
+    terminals = getattr(tree, "support_terminal_ids", set())
+    patch_tops = getattr(tree, "patch_terminal_top_z", {})
     for i in reversed(order):
         n = tree.nodes[i]
-        z = float(n.position[2])
-        c = n.contact_id if n.kind == NodeKind.TIP else None
+        z = max(float(n.position[2]), patch_tops.get(n.contact_id, -np.inf))
+        c = n.contact_id if n.kind == NodeKind.TIP and n.contact_id not in terminals else None
         for k in ch[i]:
             if k in ztop:
                 z = max(z, ztop[k])
@@ -946,7 +953,7 @@ def _check_removal(mesh, tree: SupportTree, params: SupportParams, issues, exemp
     # island anchors (contacts.ANCHOR_*) are dense on purpose: their ring around the
     # lowest point of an island is the trade-off chosen to keep its first layers on the
     # supports (docs/ALGORITHM.md), so they are not counted here (still in contact_area)
-    exempt = set(exempt_ids)
+    exempt = set(exempt_ids) | getattr(tree, "support_terminal_ids", set())
     marks = [n for n in tree.nodes.values() if n.kind in (NodeKind.TIP, NodeKind.MODEL_FOOT)
              and not (n.kind == NodeKind.TIP and n.contact_id in exempt)]
     if len(marks) < MARK_MIN_CONTACTS:
@@ -1004,7 +1011,8 @@ def support_stats(mesh, contacts, tree: SupportTree, support_mesh, raft_mesh,
             return 0.0
     sv, rv = vol(support_mesh), vol(raft_mesh)
     nodes = list(tree.nodes.values()) if tree is not None else []
-    tips = [n for n in nodes if n.kind == NodeKind.TIP]
+    terminals = getattr(tree, "support_terminal_ids", set())
+    tips = [n for n in nodes if n.kind == NodeKind.TIP and n.contact_id not in terminals]
     pads = [n for n in nodes if n.kind == NodeKind.MODEL_FOOT]
     area = float(sum(np.pi * float(n.radius) ** 2 for n in tips + pads))
     height = 0.0
@@ -1024,6 +1032,7 @@ def support_stats(mesh, contacts, tree: SupportTree, support_mesh, raft_mesh,
         "contact_area_mm2": area,
         "model_contacts": len(tips) + len(pads),
         "tip_contacts": len(tips),
+        "patch_terminals": sum(n.kind == NodeKind.TIP and n.contact_id in terminals for n in nodes),
         "model_feet": len(pads),
         "max_tree_height_mm": float(height),
         "max_slenderness": float(max((r["slenderness"] for r in recs), default=0.0)),

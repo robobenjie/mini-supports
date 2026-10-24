@@ -466,7 +466,19 @@ def build_tree(mesh: trimesh.Trimesh, contacts: list[Contact], params: SupportPa
     if model_on_raft(params):
         _model_outline(tree, mesh, params)
     contacts = [c for c in contacts if c.enabled]
+    tree.support_terminal_ids = {c.id for c in contacts if c.support_terminal}
     tree.contact_normals = {}
+    if params.removal_groups:
+        # Prefer a split between underside clusters; without patches use the
+        # narrow bounding-box axis. Routing retains ownership as branches bend.
+        axis = int(np.argmin(mesh.extents[:2]))
+        if params.underside_patches:
+            from .patches import patch_removal_axis
+            axis = patch_removal_axis(mesh, [c for c in contacts if not c.support_terminal], params)
+        tree.removal_axis = axis
+        tree.removal_center = float(mesh.bounds.mean(axis=0)[axis])
+        tree.contact_groups = {c.id: (-1 if c.position[axis] < tree.removal_center else 1)
+                               for c in contacts}
     for c in contacts:
         normal = np.asarray(c.normal, float)
         length = float(np.linalg.norm(normal))
@@ -515,6 +527,8 @@ class _Router:
         self._retry_failed_tips()
         self._limit_widening()
         self._stabilize_feet()
+        if P.fdm_stability and P.braces_enabled:
+            self._bed_motion_braces()
         if P.raft_split:
             from .raft_split import plan_split
             if P.raft_enabled and not model_on_raft(P):
@@ -527,7 +541,9 @@ class _Router:
             tree._raft_split_original_braces = list(tree.braces)
             plan_split(tree, P, self.mesh)
             if getattr(tree, "raft_split_root_sides", {}):
-                tree.braces = []
+                from .raft_split import same_half
+                tree.braces = [brace for a, b, brace in getattr(tree, "_stability_braces", [])
+                               if same_half(tree, a, b)]
                 if P.braces_enabled:
                     self._braces()
             prog.update(1.0, "Tree done")
@@ -629,11 +645,14 @@ class _Router:
             rb = self.tip_base_r(tip_r)
             u = self._tip_dir(pos, n)
             base = pos + u * P.tip_length
-            if P.tip_shape == "ball":
+            if c.support_terminal:
+                tip_pos = pos.copy()
+            elif P.tip_shape == "ball":
                 tip_pos = pos + n * (tip_r - P.tip_penetration)
             else:
                 tip_pos = pos - n * P.tip_penetration
-            tip_pos = tip_pos - np.array([0.0, 0.0, P.z_gap])
+            if not c.support_terminal:
+                tip_pos = tip_pos - np.array([0.0, 0.0, P.z_gap])
             if P.raft_enabled and not model_on_raft(P) and pos[2] < zb + self.min_short_gap() - 1e-9:
                 # raft under the feet only: the model stands on the plate and the raft
                 # top is raft_thickness higher; a contact this low has no room for a
@@ -646,7 +665,10 @@ class _Router:
                 tree.failed[c.id] = "contact lies on the build plate"
                 continue
             floor = self._floor_below(pos)
-            if floor is not None and pos[2] - floor[0] < P.tip_length + self.r_min + self.hard:
+            escape = (P.removal_groups and self._base_clearance(pos, u) >= rb + self.hard
+                      and self.reach(self._base_level(base[2]), base[:2])[0])
+            if (not c.support_terminal and floor is not None
+                    and pos[2] - floor[0] < P.tip_length + self.r_min + self.hard and not escape):
                 # too little room under the contact for tip + branch: short support
                 self._short_support(c, pos, n, tip_r, floor[0], floor[1])
                 continue
@@ -838,12 +860,18 @@ class _Router:
         contact 0.5 mm from a wall starts in a column where no branch fits and ends up
         landing on the model (or crossing it)."""
         P = self.P
+        def own_side(u):
+            if not P.removal_groups:
+                return True
+            axis, centre = self.tree.removal_axis, self.tree.removal_center
+            side = -1 if pos[axis] < centre else 1
+            return (pos[axis] + u[axis] * P.tip_length - centre) * side >= self.r_tipbase + .15
         u0 = tip_direction(n, self.angle)
         want = P.xy_clearance + self.r_min
         c0 = self._base_clearance(pos, u0)
-        if c0 >= want:
+        if c0 >= want and own_side(u0):
             return u0
-        best_u, best_s = u0, (min(c0, want) + 0.05 if c0 >= 0 else -np.inf)
+        best_u, best_s = u0, (min(c0, want) + 0.05 if c0 >= 0 and own_side(u0) else -np.inf)
         cands = [tip_direction(n, self.angle, extra_tilt=True)]
         amax = math.radians(self.angle)
         for frac in (0.5, 1.0):
@@ -852,6 +880,8 @@ class _Router:
                 cands.append(np.array([math.sin(th) * math.cos(az), math.sin(th) * math.sin(az),
                                        -math.cos(th)]))
         for u in cands:
+            if not own_side(u):
+                continue
             c = self._base_clearance(pos, u)
             if c < 0:
                 continue
@@ -902,6 +932,8 @@ class _Router:
     def _grow(self, r: np.ndarray, merged: np.ndarray, h: float) -> np.ndarray:
         P = self.P
         g = P.trunk_growth_per_mm / 2 * h
+        if P.fdm_stability:
+            return np.minimum(max(P.branch_max_diameter, P.trunk_diameter) / 2, r + g)
         taper = max(P.trunk_growth_per_mm / 2, (self.r_trunk - self.r_min) / 10.0) * h
         branch = (~merged) & (r < self.r_trunk)
         out = r + g
@@ -916,6 +948,11 @@ class _Router:
         zj = zb + j * dz
         h = pos[:, 2] - zj
         r_next = self._grow(rn, merged, np.maximum(h, 0.0))
+        groups = None
+        if P.removal_groups:
+            from .raft_split import node_removal_groups
+            assignment = node_removal_groups(tree)
+            groups = np.array([assignment[int(i)] for i in ids])
 
         # candidates (N, C, 2)
         C = len(_PATTERN)
@@ -926,6 +963,16 @@ class _Router:
         md_mid = self.mdist(j, mid).reshape(N, C)
         reach = self.reach(j, flat).reshape(N, C)
         hard_ok = (md >= self.r_min + self.hard) & (md_mid >= 0.5 * self.r_min)
+        if groups is not None:
+            axis = tree.removal_axis
+            side_distance = (cand[:, :, axis] - tree.removal_center) * groups[:, None]
+            # Gradually move the lower structure out of the removal seam.
+            # A tip near the centre may start above this corridor.
+            slot_radius = np.maximum(r_next, P.foot_diameter / 2) if j <= 2 else r_next
+            required = np.minimum(slot_radius + P.raft_split_gap / 2 + .25,
+                                  np.maximum(0, (pos[:, 2] - zj)) * self.tan +
+                                  (xy[:, axis] - tree.removal_center) * groups)
+            hard_ok &= side_distance >= required[:, None] - 1e-6
         plate_ok = np.any(hard_ok & reach, axis=1)
 
         # ----- nearest neighbour targets -------------------------------------
@@ -939,7 +986,7 @@ class _Router:
                 for d, b in zip(dd[a][1:], ii[a][1:]):
                     if d > P.merge_distance:
                         break
-                    if plate_ok[b] == plate_ok[a]:
+                    if plate_ok[b] == plate_ok[a] and (groups is None or groups[b] == groups[a]):
                         nb[a] = b
                         target[a] = 0.5 * (xy[a] + xy[b])
                         break
@@ -973,7 +1020,7 @@ class _Router:
         pairs = []
         if N > 1:
             for a, b in cKDTree(xy).query_pairs(r=2 * float(move.max()) + 1e-9):
-                if plate_ok[a] != plate_ok[b]:
+                if plate_ok[a] != plate_ok[b] or (groups is not None and groups[a] != groups[b]):
                     continue
                 d = float(np.linalg.norm(xy[a] - xy[b]))
                 if d <= move[a] + move[b] + 1e-9:
@@ -988,6 +1035,8 @@ class _Router:
             if c is None:
                 continue
             rr = self._merged_radius(r_next[mem])
+            if groups is not None and (c[tree.removal_axis] - tree.removal_center) * groups[a] < max(required[mem]):
+                continue
             mdc = self.mdist2(j, c)[0]
             if mdc < self.r_min + self.hard:
                 continue
@@ -1044,7 +1093,8 @@ class _Router:
                 mdt = self.mdist2(j, qt)[0]
                 mdm = self.mdist(j, 0.5 * (qt + xy[a]))[0]
                 if mdt >= self.r_min + self.hard and mdm >= 0.5 * self.r_min and \
-                        (not plate_ok[a] or self.reach(j, qt)[0]):
+                        (not plate_ok[a] or self.reach(j, qt)[0]) and \
+                        (groups is None or (qt[tree.removal_axis] - tree.removal_center) * groups[a] >= required[a]):
                     st = float(np.sum((qt - target[a]) ** 2)) + \
                         20.0 * max(0.0, r_next[a] + P.xy_clearance - mdt) ** 2 + 0.01 * min(lt, move[a])
                     if st <= best:
@@ -1091,6 +1141,8 @@ class _Router:
     def _merged_radius(self, rs: np.ndarray) -> float:
         P = self.P
         area = math.sqrt(float(np.sum(rs ** 2)))
+        if P.fdm_stability:
+            return max(float(rs.max()), min(area, P.branch_max_diameter / 2))
         return max(self.r_trunk, float(rs.max()), min(area, P.branch_max_diameter / 2))
 
     def _after_place(self, node, j, r_nom, merged, new_ids, new_r, new_merged) -> None:
@@ -1354,7 +1406,11 @@ class _Router:
         same branch and landing checks against the existing prepared model grid.
         """
         P, tree = self.P, self.tree
-        failed = [c for c in self.contacts if c.id in self._failed_route_contacts and c.id in tree.failed]
+        # Surface-tip retries assume the endpoint lies on the model. Patch
+        # terminals are fixed joints in prebuilt support geometry; their failed
+        # roofs are omitted and the ordinary model contacts remain as fallback.
+        failed = [c for c in self.contacts if not c.support_terminal
+                  and c.id in self._failed_route_contacts and c.id in tree.failed]
         if not failed:
             return
         saved = (self.contacts, self.pending, self.landed, self.fail_nodes,
@@ -1393,6 +1449,10 @@ class _Router:
                     attempts += 1
                     trial = SupportTree()
                     _init_tree_extras(trial, tree.z_base)
+                    if P.removal_groups:
+                        trial.removal_axis = tree.removal_axis
+                        trial.removal_center = tree.removal_center
+                        trial.contact_groups = tree.contact_groups
                     base = pos+direction*P.tip_length
                     tip_pos = pos+normal*(tip_r-P.tip_penetration) if P.tip_shape == "ball" else pos-normal*P.tip_penetration
                     tip_pos = tip_pos-np.array([0.0, 0.0, P.z_gap])
@@ -1466,6 +1526,52 @@ class _Router:
                     c.radius = max(r_max, 1e-3)
 
     # -- braces -----------------------------------------------------------------------
+    def _bed_motion_braces(self):
+        """Add a Y-direction triangular load path for tall bed-rooted trees.
+
+        This is a slenderness/height heuristic, not a calibrated vibration model.
+        Both brace directions are tried against the actual sculpture solid. Each
+        new foot stays on the root's removal side and joins only that tree.
+        """
+        from .build import cone_between, trimesh_to_manifold
+        from .raft_split import _root_ids
+        P, tree = self.P, self.tree
+        tree._stability_braces = []
+        roots = _root_ids(tree)
+        model = trimesh_to_manifold(self.mesh)
+        for root in list(tree.roots()):
+            if root.kind != NodeKind.FOOT:
+                continue
+            nodes = [n for n in tree.nodes.values() if roots.get(n.id) == root.id]
+            height = max(n.position[2] for n in nodes) - tree.z_base
+            if height < max(12., P.brace_min_height):
+                continue
+            stems = [n for n in nodes if n.kind in (NodeKind.BRANCH, NodeKind.TRUNK)
+                     and n.position[2] > tree.z_base + .4 * height]
+            if not stems:
+                continue
+            upper = min(stems, key=lambda n: abs(n.position[2] - tree.z_base - .65 * height))
+            run = min(6., max(2.5, height / 4))
+            for sign in (-1, 1):
+                p0 = root.position + np.array([0., sign * run, P.foot_height])
+                p1 = upper.position
+                length = np.linalg.norm(p1 - p0)
+                if np.linalg.norm(p1[:2] - p0[:2]) > (p1[2] - p0[2]) * self.tan:
+                    continue
+                radius = max(P.brace_diameter / 2, length / 32)
+                if P.removal_groups:
+                    axis, center = tree.removal_axis, tree.removal_center
+                    side = -1 if root.position[axis] < center else 1
+                    if (p0[axis] - center) * side < radius + P.raft_split_gap / 2:
+                        continue
+                brace = cone_between(p0, p1, radius, radius, 16)
+                if brace is None or (brace ^ model).volume() > 1e-8:
+                    continue
+                foot = tree.add([p0[0], p0[1], tree.z_base], radius, NodeKind.FOOT)
+                tree.foot_radius[foot.id] = max(P.foot_diameter / 2, radius + P.line_width)
+                tree.braces.append((p0, p1, radius))
+                tree._stability_braces.append((root.id, foot.id, (p0, p1, radius)))
+
     def _braces(self) -> None:
         from .raft_split import same_half
         P, tree, zb = self.P, self.tree, self.zb

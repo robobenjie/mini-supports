@@ -1,4 +1,4 @@
-export interface Settings { profile: string; raft: boolean; raftSplit?: boolean; overhang: number; gap: number; name: string }
+export interface Settings { profile: string; raft: boolean; raftSplit?: boolean; patchGrid?: boolean; overhang: number; gap: number; name: string }
 export interface Issue { severity: 'error' | 'warning' | 'info'; code: string; message: string }
 export interface Summary {
   contacts: number; trees: number; plateZ: number; triangles: number;

@@ -57,7 +57,8 @@ def lift_clearance(params: SupportParams) -> float:
     """Free height under a contact for a full tip on a foot: tip_length + room for a
     branch (same reach as the router's short support test) + LIFT_EXTRA_LAYERS layers."""
     P = params
-    return float(P.tip_length + P.branch_min_diameter / 2 + 0.1 + LIFT_EXTRA_LAYERS * P.layer_height)
+    ordinary = float(P.tip_length + P.branch_min_diameter / 2 + 0.1 + LIFT_EXTRA_LAYERS * P.layer_height)
+    return max(ordinary, P.patch_release_grip_length + 2.6) if P.patch_release else ordinary
 
 
 def plan_lift(mesh: trimesh.Trimesh, params: SupportParams) -> LiftPlan:

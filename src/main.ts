@@ -1,5 +1,3 @@
-import '@fontsource-variable/dm-sans/wght.css';
-import '@fontsource-variable/manrope/wght.css';
 import './style.css';
 import { createIcons, Upload, ArrowUpRight, Download, RotateCcw, Rotate3d, Move, Maximize, Layers, X, Check, ChevronDown, Box, SlidersHorizontal, ShieldCheck, Sprout, CircleHelp, LoaderCircle, MoveUpRight, Eye, FileBox, Plus, Trash2 } from 'lucide';
 import { Viewer } from './viewer';
@@ -9,13 +7,13 @@ const icons={Upload,ArrowUpRight,Download,RotateCcw,Rotate3d,Move,Maximize,Layer
 const icon=(name:string)=>`<i data-lucide="${name}"></i>`;
 const $=<T extends HTMLElement=HTMLElement>(selector:string)=>document.querySelector<T>(selector)!;
 $('#app').innerHTML=`
-<header class="app-header"><a class="brand" href="/" aria-label="Mini Supports home"><img src="/icon.svg" alt=""/><span>mini<span class="brand-light">supports</span><sup>BETA</sup></span></a><div class="header-note">Small models. Thoughtful supports.</div><div class="header-right"><span class="local-badge"><span class="dot"></span> Runs on your device</span><a href="https://github.com/moshinette/arborfdm" target="_blank" rel="noreferrer">Built on ArborFDM ${icon('arrow-up-right')}</a></div></header>
+<header class="app-header"><a class="brand" href="/" aria-label="Mini Supports home">mini<br/>supports<span class="brand-dot">.</span></a><div class="header-right"><span class="local-badge"><span class="dot"></span> Runs on your device</span><a href="https://github.com/moshinette/arborfdm" target="_blank" rel="noreferrer">ArborFDM ${icon('arrow-up-right')}</a></div></header>
 <main class="workspace">
 <aside class="sidebar">
 <section class="control-section" id="model-controls" hidden>
-<p id="import-note" class="import-note" hidden></p>
 <div class="file-card" id="file-card" hidden><div class="file-symbol">${icon('file-box')}</div><div class="file-detail"><strong id="file-name"></strong><span id="file-meta"></span></div><button class="icon-button" id="remove-model" title="Clear plate" aria-label="Clear plate">${icon('x')}</button></div>
-<div class="mini-controls" id="transforms" hidden>
+<details class="model-editor"><summary>Edit model ${icon('chevron-down')}</summary><div class="mini-controls" id="transforms" hidden>
+<p id="import-note" class="import-note" hidden></p>
 <label class="mini-picker" for="mini-select">Selected mini<select id="mini-select" aria-label="Selected mini"></select></label>
 <div id="mini-status" class="mini-status" aria-live="polite"></div>
 <div class="segmented transform-tools" role="group" aria-label="Transform tool"><button data-tool="translate" class="selected" aria-pressed="true">${icon('move')} Move</button><button data-tool="rotate" aria-pressed="false">${icon('rotate-3d')} Rotate</button></div>
@@ -25,37 +23,34 @@ $('#app').innerHTML=`
 </div>
 <div class="transform-toolbar"><label>Scale <span class="input-unit"><input id="scale" type="number" value="100" min="1" max="1000" step="5" aria-label="Selected mini scale percent"/>%</span></label><button id="delete-mini" class="secondary" title="Delete selected mini (Delete / Backspace)" aria-label="Delete selected mini">${icon('trash-2')} Delete</button></div>
 <p id="transform-hint" class="rotation-hint">Move the model, supports, and raft together. Enter positions in mm; Z is the model’s height above the bed before raft clearance.</p>
-</div>
+</div></details>
 </section>
-<section class="control-section"><div class="section-heading"><h2>Support settings</h2>${icon('sprout')}</div>
-<div class="label-row"><label id="nozzle-label">Nozzle diameter</label><span>mm</span></div><div class="segmented nozzle" role="group" aria-labelledby="nozzle-label"><button data-nozzle="02" class="selected" aria-pressed="true"><span class="nozzle-mark small"></span>0.2 <small>Fine detail</small></button><button data-nozzle="04" aria-pressed="false"><span class="nozzle-mark"></span>0.4 <small>Everyday</small></button></div>
-<div class="label-row"><label id="density-label">Support density</label><span id="density-hint">The sweet spot</span></div><div class="segmented" role="group" aria-labelledby="density-label"><button data-density="light" aria-pressed="false">Light</button><button data-density="normal" class="selected" aria-pressed="true">Balanced</button><button data-density="dense" aria-pressed="false">Dense</button></div>
-<div class="parallel-control"><label for="parallel-parts">Parallel parts</label><select id="parallel-parts" aria-describedby="parallel-hint"></select><p id="parallel-hint"></p></div>
-<label class="toggle-row"><span><strong>Add a raft</strong><small>A steady foundation for small parts</small></span><input id="raft" type="checkbox" checked role="switch"/><span class="switch" aria-hidden="true"></span></label>
-<label class="toggle-row"><span><strong>Split enclosing rafts</strong><small>Separate sections for easier removal</small></span><input id="raft-split" type="checkbox" checked role="switch"/><span class="switch" aria-hidden="true"></span></label>
-<details class="advanced"><summary>${icon('sliders-horizontal')} Fine-tune ${icon('chevron-down')}</summary><div class="advanced-fields"><label>Overhang angle <span class="input-unit"><input id="overhang" type="number" min="10" max="80" step="1" value="55"/>°</span></label><label>Tip Z gap <span class="input-unit"><input id="gap" type="number" min="0" max="0.4" step="0.01" value="0.03"/>mm</span></label><p>Angles are measured from vertical. A larger tip gap makes removal easier but reduces contact.</p></div></details>
+<section class="control-section"><div class="section-heading"><h2><span>01</span>Support settings</h2></div>
+
+
+
+<details class="advanced"><summary>${icon('sliders-horizontal')} Fine-tune ${icon('chevron-down')}</summary><div class="advanced-fields"><div class="label-row"><label id="nozzle-label">Nozzle diameter</label><span>mm</span></div><div class="segmented nozzle" role="group" aria-labelledby="nozzle-label"><button data-nozzle="02" class="selected" aria-pressed="true"><span class="nozzle-mark small"></span>0.2 <small>Fine detail</small></button><button data-nozzle="04" aria-pressed="false"><span class="nozzle-mark"></span>0.4 <small>Everyday</small></button></div><label class="toggle-row"><span><strong>Add a raft</strong></span><input id="raft" type="checkbox" checked role="switch"/><span class="switch" aria-hidden="true"></span></label><div class="label-row"><label id="density-label">Support density</label><span id="density-hint">Balanced</span></div><div class="segmented" role="group" aria-labelledby="density-label"><button data-density="light" aria-pressed="false">Light</button><button data-density="normal" class="selected" aria-pressed="true">Balanced</button><button data-density="dense" aria-pressed="false">Dense</button></div><div class="parallel-control"><label for="parallel-parts">Parallel parts</label><select id="parallel-parts" aria-describedby="parallel-hint"></select><p id="parallel-hint"></p></div><p id="support-method" class="rotation-hint">Targeted underside patches with breakaway grips; tapered trees and braces for taller supports.</p><label class="toggle-row"><span><strong>Split large or enclosing rafts</strong><small>Slot pads wider than 12.7 mm; preserve support roots</small></span><input id="raft-split" type="checkbox" checked role="switch"/><span class="switch" aria-hidden="true"></span></label><label class="toggle-row"><span><strong>5 mm patch grid</strong><small>Divide broad patches into smaller removable sections</small></span><input id="patch-grid" type="checkbox" checked role="switch"/><span class="switch" aria-hidden="true"></span></label><label>Overhang angle <span class="input-unit"><input id="overhang" type="number" min="10" max="80" step="1" value="55"/>°</span></label><label>Tip Z gap <span class="input-unit"><input id="gap" type="number" min="0" max="0.4" step="0.01" value="0.06"/>mm</span></label><p>Angles are measured from vertical. A larger tip gap makes removal easier but reduces contact.</p></div></details>
 </section>
-<div class="sidebar-bottom"><span class="tiny-tree">✳</span><span>Free, open source, and growing.</span><a href="/mini-supports-source.zip" id="source-link" title="Download corresponding source (GPL-3.0-or-later)">Source ${icon('arrow-up-right')}</a></div>
+<div class="sidebar-bottom"><span>Open source</span><a href="https://github.com/robobenjie/mini-supports" id="source-link" target="_blank" rel="noreferrer" title="View source on GitHub (GPL-3.0-or-later)">Source ${icon('arrow-up-right')}</a></div>
 </aside>
 <section class="stage-panel">
-<div class="stage-heading"><h1 id="stage-title">Plate preview</h1><button id="help" class="icon-button" aria-label="How it works" title="How it works">${icon('circle-help')}</button></div>
+<div class="support-actions" role="group" aria-label="Support actions"><div class="generation-action"><button id="generate" class="primary" disabled><span>Generate supports</span>${icon('arrow-up-right')}</button></div><button class="download" id="download" disabled>${icon('download')} Download 3MF</button><button id="cancel" class="cancel" hidden>Cancel generation</button><div id="generation-progress"><div id="progress-section" class="progress-section" hidden><div><span id="progress-message">Starting engine…</span><span id="progress-percent">0%</span></div><div class="progress-track"><div id="progress-bar" role="progressbar" aria-label="Support generation progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div></div><span class="runtime-note" id="elapsed">0:00 elapsed</span></div></div></div>
 <input id="file-input" type="file" accept=".stl,.3mf" multiple hidden/>
-<div class="support-actions" role="group" aria-label="Support actions"><button id="generate" class="primary" disabled>${icon('sprout')}<span>Generate supports</span><kbd>↵</kbd></button><button class="download" id="download" disabled>${icon('download')} Download 3MF</button><button id="cancel" class="cancel" hidden>Cancel generation</button></div>
+
 <div class="viewport-wrap" id="drop-target" role="region" aria-label="Plate preview. Drop STL or 3MF files here."><div id="viewport"></div><div class="viewport-top"><span class="view-label"><span class="dot"></span> PERSPECTIVE <span class="slash">/</span> MM</span><div class="view-tools"><button id="add-models" data-import class="add-models" aria-label="Add STL or 3MF files" title="Add STL or 3MF files">${icon('plus')}<span>Add files</span></button><span></span><button id="xray" class="icon-button" aria-pressed="false" title="Toggle transparent model" aria-label="Toggle transparent model">${icon('eye')}</button><button id="top-view" class="icon-button" title="Top view" aria-label="Top view">${icon('layers')}</button><span></span><button id="fit" class="icon-button" title="Fit model" aria-label="Fit model">${icon('maximize')}</button></div></div>
 <div id="empty-state" class="empty-state">${icon('upload')}<h3>Drop models onto the plate</h3><p>STL or 3MF · files stay on your device</p><button id="empty-upload" data-import class="secondary">${icon('plus')} Choose files</button></div>
-<div class="model-dimensions" id="dimensions"></div><div class="axis-gizmo" aria-hidden="true"><span class="z">Z</span><span class="y">Y</span><span class="x">X</span><svg viewBox="0 0 70 70"><path d="M35 38V9" stroke="#93be9b"/><path d="M35 38 10 53" stroke="#ba9e80"/><path d="M35 38 61 53" stroke="#90a5b0"/><circle cx="35" cy="38" r="3" fill="#d8dfd5"/></svg></div>
-<div class="viewport-bottom"><div class="legend"><label><input type="checkbox" data-visible="model" checked/><span class="swatch model"></span>Model</label><label><input type="checkbox" data-visible="supports" checked/><span class="swatch support"></span>Supports</label><label><input type="checkbox" data-visible="raft" checked/><span class="swatch raft"></span>Raft</label></div><span class="grid-note">10 mm grid</span></div><div class="drop-overlay">${icon('upload')}<strong>Add models to your plate</strong><span>STLs fill nearby spaces on your plate</span></div></div>
-<div id="progress-section" class="progress-section" hidden><div><span id="progress-message">Starting engine…</span><span id="progress-percent">0%</span></div><div class="progress-track"><div id="progress-bar" role="progressbar" aria-label="Import and support generation progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div></div><span class="runtime-note" id="elapsed">0:00 elapsed</span></div>
-<div class="stage-controls"><span>Drag mini to edit <b>·</b> Delete to remove <b>·</b> Drag empty space to orbit <b>·</b> Scroll to zoom <b>·</b> Right-drag to pan</span><button class="text-button" id="reset-view">${icon('rotate-ccw')} Reset view</button></div>
+<div class="model-dimensions" id="dimensions"></div><div class="axis-gizmo" aria-hidden="true"><span class="z">Z</span><span class="y">Y</span><span class="x">X</span><svg viewBox="0 0 70 70"><path d="M35 38V9" stroke="#597a53"/><path d="M35 38 10 53" stroke="#b65d2c"/><path d="M35 38 61 53" stroke="#4b6c91"/><circle cx="35" cy="38" r="3" fill="#44494c"/></svg></div>
+<div class="viewport-bottom"><span class="grid-note">10 mm grid</span></div><div class="drop-overlay">${icon('upload')}<strong>Add models to your plate</strong><span>STLs fill nearby spaces on your plate</span></div><div id="import-overlay" class="import-overlay" hidden><section class="import-dialog" role="dialog" aria-modal="true" aria-labelledby="import-title"><h2 id="import-title">Importing models</h2><div id="import-progress"></div><div id="import-actions"></div></section></div></div>
+<div class="stage-heading"><h1 id="stage-title">Plate preview</h1><div class="stage-heading-tools"><button class="text-button" id="reset-view">${icon('rotate-ccw')} Reset view</button><button id="help" class="icon-button" aria-label="How it works" title="How it works">${icon('circle-help')}</button></div></div>
 <div class="output-panel"><div class="output-header"><div class="output-title"><div><h2>Support summary</h2><p id="output-description">Add models to the plate to generate supports.</p></div></div><span id="status-pill" class="status-pill" aria-live="polite">Awaiting supports</span></div>
 
 <div class="output-bottom"><div class="metrics"><div><span id="contact-count">—</span><small>Contact points</small></div><div><span id="tree-count">—</span><small>Support trees</small></div><div><span id="material-count">—</span><small>Support PLA, est.</small></div></div></div>
 <div id="report" class="report" hidden><details><summary id="report-title"></summary><div id="report-list"></div></details></div>
-<div class="slicer-note">${icon('layers')} Each mini keeps its model, supports, and raft together as one object. Turn off automatic supports in your slicer.</div></div>
-<footer class="workspace-footer"><span>Powered by the original ArborFDM engine · WebAssembly</span><a href="/LICENSE.txt" target="_blank">GPL-3.0-or-later ${icon('arrow-up-right')}</a></footer>
+<div class="slicer-note">${icon('layers')} Each mini keeps its original mesh, supports, and raft together. Use your printer and filament preset with automatic supports off. For the 0.2 mm profile: 0.06 mm layers and 6 bottom layers on the model (3 on supports).</div></div>
+<footer class="workspace-footer"><span>Modified ArborFDM engine · WebAssembly</span><a href="/LICENSE.txt" target="_blank">GPL-3.0-or-later ${icon('arrow-up-right')}</a></footer>
 </section></main>
 <div id="toast" role="alert" hidden></div>
-<dialog id="help-dialog"><button id="close-help" class="icon-button" aria-label="Close help">${icon('x')}</button><span class="eyebrow">FROM MODEL TO SLICER</span><h2>A small guide to better supports.</h2><ol><li><strong>Add STL or 3MF files.</strong> A 3MF keeps its printable parts’ rotations, spacing, and relative heights. The whole arrangement is centered and placed on the bed together. Drop more STLs to place them in nearby spaces while keeping existing supports. Clear the plate to start again. STL units are millimeters; 3MF units are converted automatically.</li><li><strong>Move, rotate, and grow.</strong> Select a mini, then choose Move or Rotate. Drag a mini directly to select and move or rotate it in one gesture. Use the XYZ handles or enter exact positions and angles for precise edits. Delete or Backspace removes the selected mini and its supports. Moving keeps the model, supports, and raft together. Rotation and scaling clear only that mini’s supports. Z is the model’s height above the bed before raft clearance. Generate supports processes only minis that need it.  The original ArborFDM engine analyzes layers, places contact tips, routes trees, and checks the result locally.</li><li><strong>Download the 3MF.</strong> Open in OrcaSlicer or Bambu Studio. Each mini is an assembly with aligned model, support, and raft parts. Disable automatic supports, match the selected nozzle, and inspect the layer preview.</li></ol><p class="help-warning">Experimental, like the upstream project. Geometry checks cannot guarantee a successful print. Import a single plate’s geometry. Each mini can be up to 250 mm after scaling. File size, triangle count, and expanded 3MF model data are uncapped; available browser memory and processing time determine practical capacity. 3MF imports geometry and placement; printer presets, colors, modifiers, and painted supports are not retained. Supports are generated per mini; leave room between minis and inspect overlaps after rotation. Manual contact editing and mesh repair are not included.</p><a href="https://github.com/moshinette/arborfdm" target="_blank" rel="noreferrer">Explore the original project ↗</a></dialog>`;
+<dialog id="help-dialog"><button id="close-help" class="icon-button" aria-label="Close help">${icon('x')}</button><span class="eyebrow">FROM MODEL TO SLICER</span><h2>Using Mini Supports</h2><ol><li><strong>Add STL or 3MF files.</strong> A 3MF keeps its printable parts’ rotations, spacing, and relative heights. The whole arrangement is centered and placed on the bed together. Drop more STLs to place them in nearby spaces while keeping existing supports. Clear the plate to start again. STL units are millimeters; 3MF units are converted automatically.</li><li><strong>Move, rotate, and grow.</strong> Select a mini, then choose Move or Rotate. Drag a mini directly to select and move or rotate it in one gesture. Use the XYZ handles or enter exact positions and angles for precise edits. Delete or Backspace removes the selected mini and its supports. Moving keeps the model, supports, and raft together. Rotation and scaling clear only that mini’s supports. Z is the model’s height above the bed before raft clearance. Generate supports processes only minis that need it.  Our modified ArborFDM engine adds targeted underside patches, breakaway grips, tapered trees, braces, and raft splits locally. The 0.2 mm profile includes the print-tested improvements; the 0.4 mm profile retains the original tree settings.</li><li><strong>Download the 3MF.</strong> Open in OrcaSlicer or Bambu Studio. Each mini is an assembly with aligned model, support, and raft parts. Disable automatic supports, match the selected nozzle, and inspect the layer preview. The 0.2 mm export carries 0.06 mm layer height and six model bottom layers for Bambu Studio / OrcaSlicer; verify these after import, especially if opening geometry only. Printer and filament presets, temperatures, speed, slicing, and sending the print remain in your slicer.</li></ol><p class="help-warning">Experimental, like the upstream project. Geometry checks cannot guarantee a successful print. Import a single plate’s geometry. Each mini can be up to 250 mm after scaling. File size, triangle count, and expanded 3MF model data are uncapped; available browser memory and processing time determine practical capacity. 3MF imports geometry and placement; printer presets, colors, modifiers, and painted supports are not retained. Supports are generated per mini; leave room between minis and inspect overlaps after rotation. Manual contact editing and mesh repair are not included.</p><a href="https://github.com/moshinette/arborfdm" target="_blank" rel="noreferrer">Explore the original project ↗</a></dialog>`;
 createIcons({icons});
 let viewer:Viewer;
 try { viewer=new Viewer($('#viewport')); } catch {
@@ -69,7 +64,7 @@ let queue: { id:string; revision:number }[] = [], queueIndex=0, completedJobs=0;
 let workers:Worker[]=[];
 const activeJobs=new Map<Worker,{name:string;fraction:number}>();
 const cpuThreads=Math.max(1,Math.floor(navigator.hardwareConcurrency||2));
-const autoWorkers=Math.min(4,Math.max(1,cpuThreads-1));
+const autoWorkers=Math.min(12,Math.max(1,cpuThreads-1));
 const parallelParts=$<HTMLSelectElement>('#parallel-parts');
 parallelParts.add(new Option(`Auto · up to ${autoWorkers}`, 'auto'));
 for(let count=1;count<=cpuThreads;count++)parallelParts.add(new Option(String(count),String(count)));
@@ -85,7 +80,28 @@ function parallelInfo() {
 parallelParts.onchange=()=>{if(!busy)trimWorkers(workerLimit());parallelInfo()};
 parallelInfo();
 let startedAt=0, elapsedTimer:ReturnType<typeof setInterval>|undefined;
-function beginProgress(message:string) {
+let progressKind:'generation'|'import'='generation';
+let importFocus:HTMLElement|undefined;
+const importBackground=Array.from(document.querySelectorAll<HTMLElement>('.app-header,.sidebar,.support-actions,.stage-heading,.output-panel,.workspace-footer,.viewport-wrap > :not(#import-overlay)'));
+function showProgress() {
+  const importing=busy&&progressKind==='import';
+  const overlay=$('#import-overlay'),cancel=$<HTMLButtonElement>('#cancel');
+  if(importing&&overlay.hidden)importFocus=document.activeElement instanceof HTMLElement?document.activeElement:undefined;
+  const closing=!importing&&!overlay.hidden;
+  overlay.hidden=!importing;
+  importBackground.forEach(element=>element.inert=importing);
+  (importing?$('#import-actions'):$('.support-actions')).append(cancel);
+  $('#progress-section').hidden=!startedAt||(progressKind==='import'&&!busy);
+  if(importing&&document.activeElement!==cancel)cancel.focus({preventScroll:true});
+  if(closing){
+    const target=importFocus?.isConnected&&!importFocus.matches(':disabled')?importFocus:$('#add-models');
+    target.focus({preventScroll:true});importFocus=undefined;
+  }
+}
+function beginProgress(message:string,kind:'generation'|'import'='generation') {
+  progressKind=kind;
+  (kind==='import'?$('#import-progress'):$('#generation-progress')).append($('#progress-section'));
+  $('#progress-bar').setAttribute('aria-label',kind==='import'?'Import progress':'Support generation progress');
   startedAt=performance.now();clearInterval(elapsedTimer);
   elapsedTimer=setInterval(()=>{$('#elapsed').textContent=`${Math.floor((performance.now()-startedAt)/60000)}:${String(Math.floor((performance.now()-startedAt)/1000)%60).padStart(2,'0')} elapsed`},250);
   updateProgress(0,message);$('#elapsed').textContent='0:00 elapsed';
@@ -122,6 +138,7 @@ function selectionInfo(force=false) {
 }
 function renderState() {
   const completed=viewer.minis.filter(mini=>mini.result), pending=viewer.minis.length-completed.length;
+  const ready=completed.length>0&&pending===0;
   const summaries=completed.map(mini=>mini.result!.summary);
   const issues=completed.flatMap(mini=>mini.result!.summary.issues.map(issue=>({...issue,message:`${mini.name}: ${issue.message}`})));
   const errors=issues.filter(issue=>issue.severity==='error').length, warnings=issues.filter(issue=>issue.severity==='warning').length;
@@ -129,13 +146,13 @@ function renderState() {
   $('#tree-count').textContent=completed.length?summaries.reduce((n,s)=>n+s.trees,0).toLocaleString():'—';
   $('#material-count').textContent=completed.length?`${summaries.reduce((n,s)=>n+Number(s.stats.support_mass_g??0),0).toFixed(2)} g`:'—';
   if(!busy) {
-    $('#status-pill').textContent=!viewer.minis.length?'Add models':pending?(completed.length?`${completed.length}/${viewer.minis.length} minis ready`:'Awaiting supports'):plateOutput?(errors?'Ready · errors reported':warnings?'Ready · review notes':'Ready to slice'):'Awaiting export';
-    $('#status-pill').className=`status-pill ${plateOutput?(errors||warnings?'review':'ready'):''}`;
-    $('#output-description').textContent=pending&&completed.length?`${completed.length} ${completed.length===1?'mini keeps its':'minis keep their'} supports. Generate supports for ${pending} changed ${pending===1?'mini':'minis'}.`:plateOutput?`${completed.length} supported ${completed.length===1?'mini':'minis'} · original detail preserved`:viewer.minis.length?'Generate supports for the parts on this plate.':'Add models to the plate to generate supports.';
+    $('#status-pill').textContent=!viewer.minis.length?'Add models':pending?(completed.length?`${completed.length}/${viewer.minis.length} minis ready`:'Awaiting supports'):errors?'Ready · errors reported':warnings?'Ready · review notes':'Ready to download';
+    $('#status-pill').className=`status-pill ${ready?(errors||warnings?'review':'ready'):''}`;
+    $('#output-description').textContent=pending&&completed.length?`${completed.length} ${completed.length===1?'mini keeps its':'minis keep their'} supports. Generate supports for ${pending} changed ${pending===1?'mini':'minis'}.`:ready?`${completed.length} supported ${completed.length===1?'mini':'minis'} · original detail preserved`:viewer.minis.length?'Generate supports for the parts on this plate.':'Add models to the plate to generate supports.';
   }
-  $('#generate span').textContent=busy?'Working…':!viewer.minis.length?'Generate supports':pending&&completed.length?`Generate supports (${pending} ${pending===1?'mini':'minis'})`:pending?'Generate supports':plateOutput?'Supports up to date':'Prepare download';
-  $('#generate').toggleAttribute('disabled',busy||!viewer.minis.length||(!pending&&!!plateOutput));
-  $('#download').toggleAttribute('disabled',busy||!plateOutput||pending>0);
+  $('#generate span').textContent=busy?'Working…':!viewer.minis.length?'Generate supports':pending&&completed.length?`Generate supports (${pending} ${pending===1?'mini':'minis'})`:pending?'Generate supports':'Supports up to date';
+  $('#generate').toggleAttribute('disabled',busy||!viewer.minis.length||!pending);
+  $('#download').toggleAttribute('disabled',busy||!ready);
   $('#report').hidden=!issues.length;
   $('#report-title').textContent=[`${errors} ${errors===1?'error':'errors'}`,`${warnings} ${warnings===1?'warning':'warnings'}`,`${issues.filter(i=>i.severity==='info').length} ${issues.filter(i=>i.severity==='info').length===1?'note':'notes'}`].join(' · ');
   $('#report-list').replaceChildren();
@@ -146,18 +163,13 @@ function invalidatePlate() {plateOutput=undefined;renderState()}
 function invalidateAll() {viewer.invalidateAll();invalidatePlate()}
 viewer.onSelection=()=>selectionInfo(true);
 viewer.onEdit=invalidatePlate;
-viewer.onPlacement=()=>queueMicrotask(repackMovedPlate);
-function repackMovedPlate() {
-  if(busy||viewer.isManipulating()||plateOutput||!viewer.minis.length||viewer.minis.some(mini=>!mini.result))return;
-  generationRun++;setBusy(true);beginProgress('Updating plate…');$('#cancel').textContent='Cancel export';packPlate();
-}
 function setBusy(value:boolean) {
   busy=value;viewer.setLocked(value);
   if(!value){clearInterval(elapsedTimer);if(startedAt)$('#elapsed').textContent=`Completed in ${((performance.now()-startedAt)/1000).toFixed(1)}s`;}
   document.querySelectorAll<HTMLButtonElement|HTMLInputElement|HTMLSelectElement>('.sidebar button,.sidebar input,.sidebar select,[data-import]').forEach(e=>e.disabled=value);
   $<HTMLInputElement>('#raft-split').disabled=value||!$<HTMLInputElement>('#raft').checked;
   $('#cancel').hidden=!value;$<HTMLButtonElement>('#cancel').disabled=false;
-  $('#progress-section').hidden=!value&&!startedAt;$('#generate').classList.toggle('working',value);renderState();
+  $('#generate').classList.toggle('working',value);renderState();showProgress();
 }
 function updateImportNote() {
     $('#import-note').hidden=!has3mf;
@@ -166,7 +178,7 @@ function updateImportNote() {
 async function loadFiles(files:File[], append=viewer.minis.length>0&&files.every(file=>/\.stl$/i.test(file.name))) {
   if(!files.length||busy)return;
   const version=++uploadVersion;
-  setBusy(true);beginProgress('Reading local files…');$('#cancel').textContent='Cancel import';
+  beginProgress('Reading local files…','import');setBusy(true);$('#cancel').textContent='Cancel import';
   try {
     if(files.some(f=>! /\.(stl|3mf)$/i.test(f.name)))throw new Error('Please choose STL (ASCII or binary) or 3MF files.');
     pendingImport=new Worker(new URL('./plate.worker.ts',import.meta.url),{type:'module'});
@@ -222,7 +234,7 @@ async function deleteSelected() {
   if(busy||viewer.isManipulating()||!viewer.selected||!plateWorker)return;
   if(viewer.minis.length===1){clearPlate();return}
   const mini=viewer.selected,index=viewer.minis.indexOf(mini),current=plateWorker,requestId=++plateRequest;
-  setBusy(true);beginProgress('Removing selected mini…');$('#cancel').hidden=true;
+  beginProgress('Removing selected mini…');setBusy(true);$('#cancel').hidden=true;
   try {
     partCount=await new Promise<number>((resolve,reject)=>{
       current.onmessage=event=>{const message=event.data;if(message.requestId!==requestId)return;if(message.type==='removed')resolve(message.partCount);else if(message.type==='error')reject(new Error(message.message))};
@@ -231,7 +243,7 @@ async function deleteSelected() {
     });
     viewer.remove(mini.id);invalidatePlate();
     modelName=viewer.minis.length===1?viewer.minis[0].name:`${viewer.minis.length} miniatures`;$('#stage-title').textContent=modelName;$('#file-name').textContent=`${viewer.minis.length} ${viewer.minis.length===1?'mini':'minis'}`;
-    updateImportNote();updateProgress(1,`Removed ${mini.name}`);setBusy(false);repackMovedPlate();
+    updateImportNote();updateProgress(1,`Removed ${mini.name}`);setBusy(false);
   } catch(error) {setBusy(false);toast(error instanceof Error?error.message:String(error))}
 }
 $('#delete-mini').onclick=()=>void deleteSelected();
@@ -250,13 +262,14 @@ document.addEventListener('dragover',e=>{if(e.dataTransfer?.types.includes('File
 document.addEventListener('drop',e=>{e.preventDefault();dragDepth=0;dropTarget.classList.remove('dragover');if(e.dataTransfer&&e.target instanceof Node&&dropTarget.contains(e.target))void loadFiles(Array.from(e.dataTransfer.files))});
 for(const button of document.querySelectorAll<HTMLButtonElement>('[data-nozzle]'))button.onclick=()=>{
   nozzle=button.dataset.nozzle!;document.querySelectorAll<HTMLButtonElement>('[data-nozzle]').forEach(b=>{b.classList.toggle('selected',b===button);b.setAttribute('aria-pressed',String(b===button))});
-  $<HTMLInputElement>('#gap').value=nozzle==='02'?'0.03':'0.06';invalidateAll();
+  $('#support-method').textContent=nozzle==='02'?'Targeted underside patches with breakaway grips; tapered trees and braces for taller supports.':'Original 0.4 mm tree profile. The patch and grip print tests used a 0.2 mm nozzle.';
+  $<HTMLInputElement>('#gap').value='0.06';invalidateAll();
 };
 for(const button of document.querySelectorAll<HTMLButtonElement>('[data-density]'))button.onclick=()=>{
   density=button.dataset.density!;document.querySelectorAll<HTMLButtonElement>('[data-density]').forEach(b=>{b.classList.toggle('selected',b===button);b.setAttribute('aria-pressed',String(b===button))});
-  $('#density-hint').textContent=density==='light'?'Fewer contact marks':density==='dense'?'More contact points':'The sweet spot';invalidateAll();
+  $('#density-hint').textContent=density==='light'?'Fewer contact marks':density==='dense'?'More contact points':'Balanced';invalidateAll();
 };
-for(const id of ['raft','raft-split','overhang','gap'])$('#'+id).addEventListener('input',()=>{
+for(const id of ['raft','raft-split','patch-grid','overhang','gap'])$('#'+id).addEventListener('input',()=>{
   $<HTMLInputElement>('#raft-split').disabled=busy||!$<HTMLInputElement>('#raft').checked;
   invalidateAll();
 });
@@ -270,7 +283,7 @@ $('#reset-rotation').onclick=()=>viewer.resetRotation();
 $('#rotation-snap').onchange=()=>viewer.transformTool.setRotationSnap($<HTMLInputElement>('#rotation-snap').checked?Math.PI/12:null);
 for(const input of document.querySelectorAll<HTMLInputElement>('[data-position]')) {
   input.oninput=()=>{if(input.checkValidity()&&Number.isFinite(input.valueAsNumber))viewer.move(input.dataset.position as 'x'|'y'|'z',input.valueAsNumber)};
-  input.onblur=()=>{selectionInfo(true);queueMicrotask(repackMovedPlate)};
+  input.onblur=()=>selectionInfo(true);
 }
 for(const button of document.querySelectorAll<HTMLButtonElement>('[data-tool]'))button.onclick=()=>{
   const mode=button.dataset.tool as 'translate'|'rotate';viewer.setTool(mode);
@@ -280,35 +293,42 @@ for(const button of document.querySelectorAll<HTMLButtonElement>('[data-tool]'))
 };
 $('#fit').onclick=()=>viewer.home();$('#reset-view').onclick=()=>viewer.home();$('#top-view').onclick=()=>viewer.home(true);
 $('#xray').onclick=()=>{const enabled=$('#xray').getAttribute('aria-pressed')!=='true';$('#xray').setAttribute('aria-pressed',String(enabled));viewer.xray(enabled)};
-document.querySelectorAll<HTMLInputElement>('[data-visible]').forEach(c=>c.onchange=()=>viewer.visibility(c.dataset.visible as 'model'|'supports'|'raft',c.checked));
 $('#help').onclick=()=>$<HTMLDialogElement>('#help-dialog').showModal();$('#close-help').onclick=()=>$<HTMLDialogElement>('#help-dialog').close();
+$('#import-overlay').addEventListener('keydown',event=>{
+  if(event.key==='Escape'){event.preventDefault();$('#cancel').click();}
+  if(event.key==='Tab'){event.preventDefault();$('#cancel').focus();}
+});
 $('#cancel').onclick=()=>{
   generationRun++;uploadVersion++;queue=[];workers.forEach(w=>w.terminate());workers=[];activeJobs.clear();
   pendingImport?.terminate();pendingImport=undefined;setBusy(false);updateProgress(0,'Cancelled — completed minis keep their supports');
   toast('Cancelled. Completed minis keep their supports.');
 };
-function settings(name:string):Settings {return{profile:`nozzle_${nozzle}_${density}`,raft:$<HTMLInputElement>('#raft').checked,raftSplit:$<HTMLInputElement>('#raft-split').checked,overhang:$<HTMLInputElement>('#overhang').valueAsNumber,gap:$<HTMLInputElement>('#gap').valueAsNumber,name}}
+function settings(name:string):Settings {return{profile:`nozzle_${nozzle}_${density}`,raft:$<HTMLInputElement>('#raft').checked,raftSplit:$<HTMLInputElement>('#raft-split').checked,patchGrid:$<HTMLInputElement>('#patch-grid').checked,overhang:$<HTMLInputElement>('#overhang').valueAsNumber,gap:$<HTMLInputElement>('#gap').valueAsNumber,name}}
 function failure(message:string) {
   generationRun++;queue=[];workers.forEach(w=>w.terminate());workers=[];activeJobs.clear();setBusy(false);
   const lines=message.trim().split('\n');updateProgress(0,'Generation stopped');toast(lines.at(-1)||'Generation failed.');console.error(message);
 }
 function packPlate() {
   if(!plateWorker){failure('Import the plate again before exporting.');return}
-  updateProgress(.94,'Packing original model detail…');
+  updateProgress(0,'Packing original model detail…');
   const run=generationRun,requestId=++plateRequest;
   plateWorker.onmessage=event=>{
     if(run!==generationRun||!busy)return;
     const message=event.data;if(message.requestId!==requestId)return;
-    if(message.type==='progress')updateProgress(.94+message.fraction*.06,message.message);
-    else if(message.type==='exported'){plateOutput=message.output;updateProgress(1,`${viewer.minis.length} ${viewer.minis.length===1?'part':'parts'} ready · original detail preserved`);setBusy(false)}
+    if(message.type==='progress')updateProgress(message.fraction,message.message);
+    else if(message.type==='exported'){plateOutput=message.output;updateProgress(1,`${viewer.minis.length} ${viewer.minis.length===1?'part':'parts'} ready · original detail preserved`);setBusy(false);savePlate()}
     else if(message.type==='error')failure(message.message);
   };
   plateWorker.onerror=event=>{if(run===generationRun&&busy)failure(event.message||'Plate export failed.')};
   plateWorker.postMessage({type:'export',requestId,parts:viewer.minis.map(mini=>({output:mini.result!.output,lift:-mini.result!.summary.plateZ,transform:mini.exportTransform(),supportOffset:mini.exportSupportOffset(),name:mini.name}))});
 }
+function finishGeneration() {
+  updateProgress(1,`${viewer.minis.length} / ${viewer.minis.length} · Supports ready`);
+  setBusy(false);
+}
 function nextMini(worker:Worker) {
   activeJobs.delete(worker);
-  if(queueIndex>=queue.length){if(completedJobs===queue.length)packPlate();else generationProgress();return}
+  if(queueIndex>=queue.length){if(completedJobs===queue.length)finishGeneration();else generationProgress();return}
   const entry=queue[queueIndex++],mini=viewer.minis.find(m=>m.id===entry.id)!;
   activeJobs.set(worker,{name:mini.name,fraction:0});
   generationProgress();
@@ -316,17 +336,17 @@ function nextMini(worker:Worker) {
   worker.postMessage(request,data instanceof ArrayBuffer?[data]:[data.vertices,data.indices]);
 }
 function generationProgress(detail='Growing supports…') {
-  const fraction=(completedJobs+[...activeJobs.values()].reduce((n,j)=>n+j.fraction,0))/queue.length*.94;
-  updateProgress(fraction,`${completedJobs} / ${queue.length} parts complete · ${activeJobs.size} running · ${detail}`);
+  const fraction=(completedJobs+[...activeJobs.values()].reduce((n,j)=>n+j.fraction,0))/queue.length;
+  updateProgress(fraction,`${completedJobs} / ${queue.length} · ${detail}`);
 }
 $('#generate').onclick=()=>{
   if(busy||!viewer.minis.length)return;
   const overhang=$<HTMLInputElement>('#overhang'),gap=$<HTMLInputElement>('#gap');
   if(!overhang.checkValidity()||!gap.checkValidity()||!Number.isFinite(overhang.valueAsNumber)||!Number.isFinite(gap.valueAsNumber)){toast('Use an overhang angle from 10–80° and a tip gap from 0–0.4 mm.');return}
   invalidatePlate();queue=viewer.minis.filter(mini=>!mini.result).map(mini=>({id:mini.id,revision:mini.revision}));queueIndex=0;completedJobs=0;activeJobs.clear();
-  setBusy(true);beginProgress('Starting local engine…');$('#cancel').textContent='Cancel generation';$('#status-pill').textContent='Growing…';
+  beginProgress('Starting local engine…');setBusy(true);$('#cancel').textContent='Cancel generation';$('#status-pill').textContent='Growing…';
   const run=++generationRun;
-  if(!queue.length){packPlate();return}
+  if(!queue.length){finishGeneration();return}
   const count=Math.min(queue.length,workerLimit());
   trimWorkers(count);
   while(workers.length<count)workers.push(new Worker(new URL('./engine.worker.ts',import.meta.url),{type:'module'}));
@@ -336,7 +356,7 @@ $('#generate').onclick=()=>{
       const message=event.data;
       if(message.type==='progress'){
         const job=activeJobs.get(worker);if(!job)return;job.fraction=Math.max(job.fraction,message.fraction);
-        generationProgress(`${job.name} · ${message.message}`);
+        generationProgress(message.message);
       }else if(message.type==='result'){
         if(!viewer.applyResult(message.id,message.revision,message.result)){failure('The mini changed during generation. Grow its supports again.');return}
         completedJobs++;renderState();nextMini(worker);
@@ -347,9 +367,16 @@ $('#generate').onclick=()=>{
   }
 };
 $('#download').onclick=()=>{
-  if(!plateOutput||viewer.minis.some(mini=>!mini.result))return;
+  if(busy||!viewer.minis.length||viewer.minis.some(mini=>!mini.result))return;
+  if(plateOutput){savePlate();return}
+  generationRun++;beginProgress('Packing original model detail…');setBusy(true);
+  $('#cancel').textContent='Cancel export';
+  packPlate();
+};
+function savePlate() {
+  if(!plateOutput)return;
   const blob=new Blob([plateOutput.slice().buffer],{type:'model/3mf'}),url=URL.createObjectURL(blob);
   const a=document.createElement('a');a.href=url;a.download=`${modelName.replace(/[^a-zA-Z0-9_-]/g,'-')}-supported.3mf`;a.click();setTimeout(()=>URL.revokeObjectURL(url),30000);
-};
+}
 window.addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.target===document.body||e.target===$('#generate')))$('#generate').click()});
 setBusy(false);

@@ -1,4 +1,4 @@
-"""Browser entry point; upstream generation and validated 3MF export run unchanged."""
+"""Browser entry point for the shared support engine and validated 3MF export."""
 import json
 import gc
 import math
@@ -12,7 +12,9 @@ from arbor.engine.pipeline import generate
 from arbor.engine.types import Progress
 from arbor.io.export import export_3mf, export_stl, validate_export
 from browser_bridge import progress as report
+from support_sampler import install as install_sampler
 
+install_sampler()
 PROFILES = load_profiles(Path('/engine/profiles'))
 
 def run(settings_json):
@@ -31,6 +33,8 @@ def run(settings_json):
     params = replace(PROFILES[settings['profile']].params)
     params.raft_enabled = settings['raft']
     params.raft_split = bool(settings.get('raftSplit', False))
+    params.patch_grid = bool(settings.get('patchGrid', False))
+    params.removal_groups = params.removal_groups and params.raft_enabled and params.raft_split
     params.overhang_angle_deg = float(settings['overhang'])
     params.z_gap = float(settings['gap'])
     result = generate(model, params, progress=Progress(lambda f, text: report(f * 0.94, text)))
@@ -90,6 +94,7 @@ def combine(manifest_json):
     ET.SubElement(root, '{' + CORE_NS + '}metadata', name='Title').text = manifest['name']
     resources = ET.SubElement(root, '{' + CORE_NS + '}resources')
     build = ET.SubElement(root, '{' + CORE_NS + '}build')
+    combined_config = ET.Element('config')
     lower = np.array([np.inf, np.inf, np.inf])
     next_id = 1
     for index, entry in enumerate(manifest['parts']):
@@ -102,9 +107,17 @@ def combine(manifest_json):
             lower = np.minimum(lower, part.mesh.bounds[0] + [0, 0, lift])
         with zipfile.ZipFile(filename) as archive:
             source = ET.fromstring(archive.read('3D/3dmodel.model'))
+            source_config = ET.fromstring(archive.read('Metadata/model_settings.config')) if 'Metadata/model_settings.config' in archive.namelist() else None
         objects = source.findall('m:resources/m:object', ns)
         mapping = {o.attrib['id']: str(next_id + i) for i, o in enumerate(objects)}
         next_id += len(objects)
+        if source_config is not None:
+            for config_object in source_config.findall('object'):
+                config_object = copy.deepcopy(config_object)
+                config_object.set('id', mapping[config_object.get('id')])
+                for part in config_object.findall('part'):
+                    part.set('id', mapping[part.get('id')])
+                combined_config.append(config_object)
         for obj in objects:
             obj = copy.deepcopy(obj)
             obj.set('id', mapping[obj.attrib['id']])
@@ -127,6 +140,8 @@ def combine(manifest_json):
         archive.writestr('[Content_Types].xml', _content_types())
         archive.writestr('_rels/.rels', _rels())
         archive.writestr('3D/3dmodel.model', ET.tostring(root, encoding='utf-8', xml_declaration=True))
+        if len(combined_config):
+            archive.writestr('Metadata/model_settings.config', ET.tostring(combined_config, encoding='utf-8', xml_declaration=True))
     errors = validate_export('/plate.3mf')
     if errors:
         raise ValueError('Plate export failed validation: ' + '; '.join(errors))

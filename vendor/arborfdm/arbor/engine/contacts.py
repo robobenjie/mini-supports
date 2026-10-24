@@ -94,6 +94,10 @@ class VerticalCaster:
     maximum small-triangle circumradius; the few large triangles are tested
     by brute force (chunked)."""
 
+    # Browser entry points may provide a bulk typed-array implementation.
+    # Native callers and workers without that bridge retain the reference path.
+    accelerator = None
+
     def __init__(self, mesh: trimesh.Trimesh):
         v = np.asarray(mesh.vertices, dtype=np.float64)
         f = np.asarray(mesh.faces, dtype=np.int64)
@@ -123,6 +127,12 @@ class VerticalCaster:
         self.large = np.nonzero(~small)[0]
         self.tree = cKDTree(c[self.small]) if len(self.small) else None
         self.centroid_tree = cKDTree(tri.mean(axis=1)) if len(down) else None
+        self._accelerated = None
+        if type(self).accelerator is not None:
+            try:
+                self._accelerated = type(self).accelerator(mesh, self)
+            except Exception:
+                pass
 
     def _test(self, pi: np.ndarray, ti: np.ndarray, pts: np.ndarray):
         """Return z of hit for pairs (point index, local triangle index), NaN if miss."""
@@ -146,6 +156,13 @@ class VerticalCaster:
         bestf = np.full(N, -1, dtype=np.int64)
         if N == 0 or len(self.fid) == 0:
             return np.full(N, np.nan), bestf
+        if self._accelerated is not None:
+            try:
+                return self._accelerated.cast(pts, tol)
+            except Exception:
+                # Release a failed index and use the reference for this and
+                # subsequent queries, rather than retrying a broken bridge.
+                self._accelerated = None
 
         def consider(pi, ti):
             if len(pi) == 0:

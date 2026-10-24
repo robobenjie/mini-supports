@@ -94,12 +94,12 @@ export class Viewer {
     canvas.addEventListener('pointerup',finishDrag,{capture:true});
     canvas.addEventListener('pointercancel',finishDrag,{capture:true});
     canvas.addEventListener('lostpointercapture',finishDrag);
-    this.scene.add(new THREE.HemisphereLight(0xf2f6e7, 0x384a44, 2.3));
+    this.scene.add(new THREE.HemisphereLight(0xffffff, 0x697078, 2.3));
     for (const [pos, intensity] of [[[-40, -50, 100], 3], [[60, 30, 70], 2]] as const) {
       const light = new THREE.DirectionalLight(0xffffff, intensity); light.position.set(pos[0], pos[1], pos[2]); this.scene.add(light);
     }
-    this.grid = new THREE.GridHelper(180, 18, 0x567063, 0x35463f); this.grid.rotation.x = Math.PI / 2; this.scene.add(this.grid);
-    this.plate = new THREE.Mesh(new THREE.PlaneGeometry(180, 180), new THREE.MeshBasicMaterial({ color: 0x19251f, transparent: true, opacity: .7, side: THREE.DoubleSide }));
+    this.grid = new THREE.GridHelper(180, 18, 0x969ea3, 0xb9bfc3); this.grid.rotation.x = Math.PI / 2; this.scene.add(this.grid);
+    this.plate = new THREE.Mesh(new THREE.PlaneGeometry(180, 180), new THREE.MeshBasicMaterial({ color: 0xd6dadd, transparent: true, opacity: .7, side: THREE.DoubleSide }));
     this.plate.position.z = -.08; this.scene.add(this.plate);
     const resize = () => { const { width, height } = container.getBoundingClientRect(); this.renderer.setSize(width, height); this.camera.aspect = width / height; this.camera.updateProjectionMatrix(); };
     new ResizeObserver(resize).observe(container); resize(); this.home();
@@ -151,7 +151,7 @@ export class Viewer {
   private refreshMaterials() {
     for (const mini of this.minis) {
       const material = mini.model.material as THREE.MeshStandardMaterial;
-      material.emissive.setHex(mini === this.selected ? 0x293d16 : 0x000000);
+      material.emissive.setHex(mini === this.selected ? 0x191b1e : 0x000000);
       material.transparent = this.transparent; material.opacity = this.transparent ? .27 : 1;
       material.depthWrite = !this.transparent; material.needsUpdate = true;
       for (const part of ['model', 'supports', 'raft'] as const) { const mesh = mini[part]; if (mesh) mesh.visible = this.visible[part]; }
@@ -185,7 +185,7 @@ export class Viewer {
     const bounds = this.bounds();
     const width = this.minis.length ? Math.max(100, Math.ceil(Math.max(Math.abs(bounds.min.x), Math.abs(bounds.max.x), Math.abs(bounds.min.y), Math.abs(bounds.max.y)) * 2 / 10) * 10 + 40) : 180;
     this.scene.remove(this.grid); this.grid.geometry.dispose(); (this.grid.material as THREE.Material).dispose();
-    this.grid = new THREE.GridHelper(width, width / 10, 0x567063, 0x35463f); this.grid.rotation.x = Math.PI / 2; this.scene.add(this.grid);
+    this.grid = new THREE.GridHelper(width, width / 10, 0x969ea3, 0xb9bfc3); this.grid.rotation.x = Math.PI / 2; this.scene.add(this.grid);
     this.plate.scale.multiplyScalar(width / this.width); this.width = width;
   }
   home(top = false) {

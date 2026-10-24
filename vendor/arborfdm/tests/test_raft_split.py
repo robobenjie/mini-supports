@@ -249,7 +249,8 @@ def test_actual_branch_reconnection_rejects_the_slot_and_preserves_foundations()
 
 def test_pipeline_rejection_restores_the_original_braces_and_remeshes():
     from arbor.engine import pipeline
-    params = _params()
+    # Isolate cage-split rejection from the independent large-pad slotting pass.
+    params = _params(raft_max_span=0)
     tree = _fixture(params)
     _brace_router(tree, params.updated(raft_split=False))._braces()
     original_braces = copy.deepcopy(tree.braces)

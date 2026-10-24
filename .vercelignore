@@ -5,6 +5,15 @@ dist/
 .agents/
 .env*
 test-results/
+models/
+research/
+scripts/experiments/
+scripts/research-*
+scripts/research_geometry.py
+scripts/prepare-four-bikers.py
+scripts/layout-four-bikers.py
+scripts/check-four-bikers-paths.py
+scripts/audit-biker-geometry.py
 playwright-report/
 public/runtime/
 public/mini-supports-source.zip

@@ -42,6 +42,18 @@ function checkStudioReferences(bytes) {
  }
 }
 checkStudioReferences(initial);
+// The fast original-mesh export must keep the print-tested skin settings,
+// including the thinner support skin and the shared assembly layer height.
+const settingsDoc=new DOMParser().parseFromString(new TextDecoder().decode(archive.read('Metadata/model_settings.config')),'application/xml');
+for(const obj of Array.from(settingsDoc.getElementsByTagName('object'))){
+ const own=Array.from(obj.childNodes).filter(n=>n.nodeName==='metadata');
+ assert(own.some(n=>n.getAttribute('key')==='layer_height'&&n.getAttribute('value')==='0.06'));
+ assert(own.some(n=>n.getAttribute('key')==='enable_support'&&n.getAttribute('value')==='0'));
+ const parts=Array.from(obj.getElementsByTagName('part'));
+ const bottom=part=>Array.from(part.getElementsByTagName('metadata')).find(n=>n.getAttribute('key')==='bottom_shell_layers')?.getAttribute('value');
+ assert.equal(bottom(parts[0]),'6');
+ assert(parts.slice(1).every(part=>bottom(part)==='3'));
+}
 const reread=parse3MF(initial.buffer);
 assert.equal(reread.minis.length,2);
 for(let i=0;i<2;i++){
@@ -103,6 +115,20 @@ const stlOffset=[stlActual[0]-stlExpected[0],stlActual[1]-stlExpected[1],stlActu
 for(let k=0;k<stlExpected.length;k++)assert(Math.abs(stlActual[k]-stlExpected[k]-stlOffset[k%3])<1e-4,'STL geometry must survive export, apart from the common plate translation');
 assert(![...new ZipArchive(stlOutput).members.keys()].some(path=>path.startsWith('3D/supports/')));
 console.log('PASS STL geometry-only export with no generated support or raft meshes');
+
+// Dense STL analysis can be simplified, but the downloadable sculpture cannot.
+const {SphereGeometry}=await import('three');
+const denseGeometry=new SphereGeometry(5,128,96).toNonIndexed();
+const denseData=new STLExporter().parse(new Mesh(denseGeometry),{binary:true}).buffer;
+const densePlate=new Plate(),dense=await densePlate.load([{name:'dense.stl',data:denseData}],()=>{});
+assert(dense.minis[0].topology,'STL analysis needs indexed topology');
+assert(dense.minis[0].positions.length<denseGeometry.getAttribute('position').array.length/2,'Dense STL analysis should simplify');
+assert.equal(dense.minis[0].triangles,denseGeometry.getAttribute('position').count/3);
+const denseOriginal=densePlate.sources[0].archive.read('3D/stl.model');
+const denseOutput=densePlate.export([{output:modelOnly,lift:0,transform:new Matrix4().toArray(),name:'dense'}],()=>{});
+assert.deepEqual(new ZipArchive(denseOutput).read('3D/source0/3D/stl.model'),denseOriginal,'Full-detail STL resource must survive byte-for-byte');
+assert.equal(parse3MF(denseOutput.buffer).minis[0].geometry.getAttribute('position').count,denseGeometry.getAttribute('position').count);
+console.log('PASS dense STL simplification retains every original export triangle');
 
 // Add an STL through the same transferable state used by the import worker.
 // Existing transforms and support results must survive the commit unchanged.

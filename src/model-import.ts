@@ -13,6 +13,7 @@ const UNITS: Record<string, number> = { micron: .001, millimeter: 1, centimeter:
 
 export interface ModelInput { name: string; data: ArrayBuffer }
 export interface SourceReference { path: string; objectId: string; transform: number[]; unit: number }
+export type AsyncSimplifier = (mesh: IndexedMesh | Float32Array, unit?: number) => Promise<IndexedMesh>;
 export interface ImportOptions { simplify?: (mesh: IndexedMesh, unit: number) => IndexedMesh; progress?: (fraction: number, message: string) => void }
 export interface ImportedMini { name: string; geometry: BufferGeometry; source?: SourceReference; sources?: SourceReference[]; triangles?: number; topology?: IndexedMesh }
 export interface SourcePackage { archive: ZipArchive; references: Map<string, Map<string, string>>; objectIds: Map<string, string[]> }
@@ -69,6 +70,22 @@ function packagePath(raw: string, base = ''): string {
 
 /** Read Core meshes and Production-extension instances, with all placements baked in. */
 export function parse3MF(data: ArrayBuffer, options: ImportOptions = {}): ImportedModel {
+  const prepared = prepare3MF(data, options.progress);
+  if (options.simplify) for (const {mesh, unit} of prepared.jobs) Object.assign(mesh, options.simplify(mesh, unit));
+  return prepared.finish(!!options.simplify);
+}
+
+export async function parse3MFAsync(data: ArrayBuffer, simplify: AsyncSimplifier, progress?: ImportOptions['progress']): Promise<ImportedModel> {
+  const prepared = prepare3MF(data, progress);
+  let completed = 0;
+  await Promise.all(prepared.jobs.map(async ({mesh, unit}) => {
+    Object.assign(mesh, await simplify(mesh, unit));
+    progress?.(.25 + .75 * ++completed / prepared.jobs.length, `Simplifying meshes · ${completed} / ${prepared.jobs.length}`);
+  }));
+  return prepared.finish(true);
+}
+
+function prepare3MF(data: ArrayBuffer, progress?: ImportOptions['progress']) {
   if (data.byteLength < 22) throw new Error('The 3MF archive is empty or truncated.');
   let archive: ZipArchive;
   try { archive = new ZipArchive(new Uint8Array(data)); }
@@ -97,8 +114,6 @@ export function parse3MF(data: ArrayBuffer, options: ImportOptions = {}): Import
     // Numeric mesh data goes straight into typed arrays; only the small structural
     // skeleton becomes a DOM. A million faces no longer creates a million XML nodes.
     const meshes: { mesh: IndexedMesh; triangles: number }[] = [];
-    const unitMatch = source.match(/<(?:[\w.-]+:)?model\b[^>]*\bunit\s*=\s*["']([^"']+)/);
-    const unit = UNITS[unitMatch?.[1] || 'millimeter'] || 1;
     source = source.replace(/<((?:[\w.-]+:)?mesh)\b[^>]*>([\s\S]*?)<\/\1\s*>/g, (_whole, tag: string, body: string) => {
       const attributes = (raw: string, names: string[]) => names.map(name => {
         const value = raw.match(new RegExp('(?:^|\\s)' + name + '\\s*=\\s*["\']([^"\']*)["\']'))?.[1];
@@ -125,7 +140,7 @@ export function parse3MF(data: ArrayBuffer, options: ImportOptions = {}): Import
       if (!vertices.every(Number.isFinite)) throw new Error('The 3MF contains coordinates outside the supported range.');
       if (!vertices.length || !indices.length) throw new Error('A printable 3MF object has no triangle geometry.');
       if (indices.some(index => index >= vertices.length / 3)) throw new Error('A 3MF triangle references a missing vertex.');
-      const mesh = options.simplify ? options.simplify({ vertices, indices }, unit) : { vertices, indices };
+      const mesh = { vertices, indices };
       meshes.push({ mesh, triangles: indices.length / 3 });
       return `<${tag} data-mesh="${meshes.length - 1}"/>`;
     });
@@ -176,7 +191,7 @@ export function parse3MF(data: ArrayBuffer, options: ImportOptions = {}): Import
     const result = { ...parsed.mesh, triangles: parsed.triangles }; meshes.set(object, result); return result;
   }
   const instances: { mesh: Mesh; world: Matrix4; source: SourceReference }[] = [];
-  let triangleCount = 0, originalTriangles = 0, visited = 0, skippedItems = 0;
+  let originalTriangles = 0, visited = 0, skippedItems = 0;
   const ancestors = new Set<string>();
   function visit(reference: Element, sourcePath: string, parent: Matrix4, depth = 0) {
     if (++visited > 20_000 || depth > 32) throw new Error('The 3MF has too many nested components or instances.');
@@ -194,7 +209,7 @@ export function parse3MF(data: ArrayBuffer, options: ImportOptions = {}): Import
     const hasMesh = children(object, 'mesh').length > 0;
     if (hasMesh && components.length) throw new Error('A 3MF object cannot contain both a mesh and components.');
     if (hasMesh) {
-      const value = mesh(object, path); triangleCount += value.indices.length / 3; originalTriangles += value.triangles;
+      const value = mesh(object, path); originalTriangles += value.triangles;
       instances.push({ mesh: value, world, source: {path, objectId, transform: world.toArray(), unit: current.unit} });
     } else {
       if (!components.length) throw new Error('A printable 3MF object has no triangle geometry.');
@@ -202,60 +217,66 @@ export function parse3MF(data: ArrayBuffer, options: ImportOptions = {}): Import
     }
     ancestors.delete(key);
   }
-  const groups: { name: string; start: number; end: number; source: SourceReference; triangles: number; firstInstance: number; lastInstance: number }[] = [];
+  const groups: { name: string; source: SourceReference; triangles: number; firstInstance: number; lastInstance: number }[] = [];
   const root = model(rootPath), scale = new Matrix4().makeScale(root.unit, root.unit, root.unit);
   const items = children(children(root.root, 'build')[0], 'item');
   for (const [index, item] of items.entries()) {
-    options.progress?.(index / items.length, options.simplify
-      ? `Simplifying meshes for support placement · ${index + 1} / ${items.length}`
-      : `Reading meshes · ${index + 1} / ${items.length}`);
+    progress?.(.25 * index / items.length, `Reading meshes · ${index + 1} / ${items.length}`);
     if (['0', 'false'].includes(item.getAttribute('printable') || '')) { skippedItems++; continue; }
-    const start = triangleCount * 9, before = originalTriangles, firstInstance = instances.length;
+    const before = originalTriangles, firstInstance = instances.length;
     visit(item, rootPath, scale);
     const target = item.getAttributeNS(PRODUCTION, 'path');
     const path = target ? packagePath(target, rootPath) : rootPath, current = model(path);
     const object = current.objects.get(id(item, 'objectid'))!;
     const transform = scale.clone().multiply(matrix(item)).multiply(new Matrix4().makeScale(current.unit / root.unit, current.unit / root.unit, current.unit / root.unit));
-    groups.push({ name: object.getAttribute('name') || `Mini ${groups.length + 1}`, start, end: triangleCount * 9, triangles: originalTriangles - before, firstInstance, lastInstance: instances.length,
+    groups.push({ name: object.getAttribute('name') || `Mini ${groups.length + 1}`, triangles: originalTriangles - before, firstInstance, lastInstance: instances.length,
       source: { path, objectId: id(item, 'objectid'), transform: transform.toArray(), unit: current.unit } });
   }
   if (!instances.length) throw new Error('The 3MF contains no printable mesh instances. Export a 3MF containing geometry.');
-  const positions = new Float32Array(triangleCount * 9), vertex = new Vector3();
-  let cursor = 0;
-  for (const { mesh, world } of instances) {
-    const mirrored = world.determinant() < 0;
-    for (let face = 0; face < mesh.indices.length; face += 3) {
-      for (const corner of mirrored ? [0, 2, 1] : [0, 1, 2]) {
-        vertex.fromArray(mesh.vertices, mesh.indices[face + corner] * 3).applyMatrix4(world);
-        positions[cursor++] = vertex.x; positions[cursor++] = vertex.y; positions[cursor++] = vertex.z;
+  // Repeated instances share one simplification job, before placements are baked in.
+  const unique = new Map<Mesh, number>();
+  for (const instance of instances) unique.set(instance.mesh, instance.source.unit);
+  function finish(simplified: boolean): ImportedModel {
+    const starts = [0];
+    for (const {mesh} of instances) starts.push(starts[starts.length - 1] + mesh.indices.length * 3);
+    const positions = new Float32Array(starts[starts.length - 1]), vertex = new Vector3();
+    let cursor = 0;
+    for (const { mesh, world } of instances) {
+      const mirrored = world.determinant() < 0;
+      for (let face = 0; face < mesh.indices.length; face += 3) {
+        for (const corner of mirrored ? [0, 2, 1] : [0, 1, 2]) {
+          vertex.fromArray(mesh.vertices, mesh.indices[face + corner] * 3).applyMatrix4(world);
+          positions[cursor++] = vertex.x; positions[cursor++] = vertex.y; positions[cursor++] = vertex.z;
+        }
       }
     }
+    if (!positions.every(Number.isFinite)) throw new Error('The 3MF contains coordinates outside the supported range.');
+    const geometry = new BufferGeometry().setAttribute('position', new Float32BufferAttribute(positions, 3));
+    geometry.computeVertexNormals();
+    const minis = groups.map(group => {
+      const part = new BufferGeometry().setAttribute('position', new Float32BufferAttribute(positions.slice(starts[group.firstInstance], starts[group.lastInstance]), 3));
+      part.computeVertexNormals();
+      let topology: IndexedMesh | undefined;
+      if (simplified) {
+        const parts = instances.slice(group.firstInstance,group.lastInstance);
+        const vertices = new Float32Array(parts.reduce((n,p)=>n+p.mesh.vertices.length,0));
+        const indices = new Uint32Array(parts.reduce((n,p)=>n+p.mesh.indices.length,0));
+        let v = 0, f = 0;
+        for (const {mesh,world} of parts) {
+          for(let i=0;i<mesh.vertices.length;i+=3){vertex.fromArray(mesh.vertices,i).applyMatrix4(world);vertices.set([vertex.x,vertex.y,vertex.z],v+i)}
+          const mirrored=world.determinant()<0;
+          for(let i=0;i<mesh.indices.length;i+=3)for(const k of mirrored?[0,2,1]:[0,1,2])indices[f++]=mesh.indices[i+k]+v/3;
+          v+=mesh.vertices.length;
+        }
+        topology={vertices,indices};
+      }
+      // Keep direct references to the original mesh leaves. Exporters can flatten
+      // cross-file assembly nesting without touching a vertex or triangle.
+      return { name: group.name, geometry: part, source: group.source, sources: instances.slice(group.firstInstance,group.lastInstance).map(instance=>instance.source), triangles: group.triangles, topology };
+    });
+    return { geometry, minis, partCount: instances.length, has3mf: true, skippedItems, source: { archive, references: sourceReferences, objectIds: new Map([...models].map(([path, value])=>[path, [...value.objects.keys()]])) } };
   }
-  if (!positions.every(Number.isFinite)) throw new Error('The 3MF contains coordinates outside the supported range.');
-  const geometry = new BufferGeometry().setAttribute('position', new Float32BufferAttribute(positions, 3));
-  geometry.computeVertexNormals();
-  const minis = groups.map(group => {
-    const part = new BufferGeometry().setAttribute('position', new Float32BufferAttribute(positions.slice(group.start, group.end), 3));
-    part.computeVertexNormals();
-    let topology: IndexedMesh | undefined;
-    if (options.simplify) {
-      const parts = instances.slice(group.firstInstance,group.lastInstance);
-      const vertices = new Float32Array(parts.reduce((n,p)=>n+p.mesh.vertices.length,0));
-      const indices = new Uint32Array(parts.reduce((n,p)=>n+p.mesh.indices.length,0));
-      let v = 0, f = 0;
-      for (const {mesh,world} of parts) {
-        for(let i=0;i<mesh.vertices.length;i+=3){vertex.fromArray(mesh.vertices,i).applyMatrix4(world);vertices.set([vertex.x,vertex.y,vertex.z],v+i)}
-        const mirrored=world.determinant()<0;
-        for(let i=0;i<mesh.indices.length;i+=3)for(const k of mirrored?[0,2,1]:[0,1,2])indices[f++]=mesh.indices[i+k]+v/3;
-        v+=mesh.vertices.length;
-      }
-      topology={vertices,indices};
-    }
-    // Keep direct references to the original mesh leaves. Exporters can flatten
-    // cross-file assembly nesting without touching a vertex or triangle.
-    return { name: group.name, geometry: part, source: group.source, sources: instances.slice(group.firstInstance,group.lastInstance).map(instance=>instance.source), triangles: group.triangles, topology };
-  });
-  return { geometry, minis, partCount: instances.length, has3mf: true, skippedItems, source: { archive, references: sourceReferences, objectIds: new Map([...models].map(([path, value])=>[path, [...value.objects.keys()]])) } };
+  return {jobs: [...unique].map(([mesh, unit]) => ({mesh, unit})), finish};
 }
 
 function parseSTL(data: ArrayBuffer): ImportedModel {
